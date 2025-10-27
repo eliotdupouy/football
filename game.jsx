@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+const { useEffect, useMemo, useRef, useState } = React;
 
 // Football Manager Lite — Sofascore fullscreen match feed
 // Changes requested by user:
@@ -92,7 +92,7 @@ function prepareMatchEventStream(home, away, tactics = {}) {
 }
 
 // --------------------------- COMPONENT ---------------------------
-export default function FootballManagerLite() {
+function FootballManagerLite() {
   const [clubs, setClubs] = useState(() => {
     const raw = localStorage.getItem('fm_clubs');
     if (raw) return JSON.parse(raw);
@@ -497,3 +497,5 @@ export default function FootballManagerLite() {
     </div>
   );
 }
+
+window.FootballManagerLite = FootballManagerLite;
