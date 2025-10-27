@@ -2,9 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Football Manager Lite — Sofascore fullscreen match feed
 // Changes requested by user:
-// - Rename "Jouer la ronde" -> "Jouer le match"
+// - Rename "Jouer la ronde" -> "Play Match"
 // - Remove "Simuler saison complète"
-// - When "Jouer le match" is clicked, open a fullscreen Sofascore-like feed
+// - When "Play Match" is clicked, open a fullscreen Sofascore-like feed
 //   that simulates the match minute-by-minute over ~5 minutes in realtime.
 // - Support speed controls: x1 (default ~3.333s per match minute), x2, x4
 // - Feed shows events with minute stamps, auto-scroll and animations (CSS),
@@ -72,22 +72,22 @@ function prepareMatchEventStream(home, away, tactics = {}) {
     const timeFactor = 1 + (Math.sin((minute / 90) * Math.PI) * 0.25);
     if (Math.random() < (homeAttackRate / 90) * timeFactor) {
       if (Math.random() < 0.22 + (homeStrength - awayStrength) / 400) {
-        homeGoals++; events.push({ minute, type: 'goal', text: `${home.name} marque! (${homeGoals}-${awayGoals})`, team: home.name });
+        homeGoals++; events.push({ minute, type: 'goal', text: `${home.name} scores! (${homeGoals}-${awayGoals})`, team: home.name });
       } else {
-        events.push({ minute, type: 'chance', text: `${home.name} manque une occasion.`, team: home.name });
+        events.push({ minute, type: 'chance', text: `${home.name} misses a chance.`, team: home.name });
       }
     }
     if (Math.random() < (awayAttackRate / 90) * timeFactor) {
       if (Math.random() < 0.2 + (awayStrength - homeStrength) / 400) {
-        awayGoals++; events.push({ minute, type: 'goal', text: `${away.name} marque! (${homeGoals}-${awayGoals})`, team: away.name });
+        awayGoals++; events.push({ minute, type: 'goal', text: `${away.name} scores! (${homeGoals}-${awayGoals})`, team: away.name });
       } else {
-        events.push({ minute, type: 'chance', text: `${away.name} manque une occasion.`, team: away.name });
+        events.push({ minute, type: 'chance', text: `${away.name} misses a chance.`, team: away.name });
       }
     }
-    if (Math.random() < 0.005) events.push({ minute, type: 'card', text: `Carton jaune — contact dur.`, team: (Math.random()<0.5?home.name:away.name) });
-    if (Math.random() < 0.002) events.push({ minute, type: 'injury', text: `Blessure: joueur remplacé.`, team: (Math.random()<0.5?home.name:away.name) });
+    if (Math.random() < 0.005) events.push({ minute, type: 'card', text: `Yellow card — heavy challenge.`, team: (Math.random()<0.5?home.name:away.name) });
+    if (Math.random() < 0.002) events.push({ minute, type: 'injury', text: `Injury: player substituted.`, team: (Math.random()<0.5?home.name:away.name) });
   }
-  if (Math.random() < 0.03) { if (Math.random() < 0.5) { homeGoals++; events.push({ minute: 90, type: 'goal', text: `${home.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: home.name }); } else { awayGoals++; events.push({ minute: 90, type: 'goal', text: `${away.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: away.name }); } }
+  if (Math.random() < 0.03) { if (Math.random() < 0.5) { homeGoals++; events.push({ minute: 90, type: 'goal', text: `${home.name} scores in stoppage time! (${homeGoals}-${awayGoals})`, team: home.name }); } else { awayGoals++; events.push({ minute: 90, type: 'goal', text: `${away.name} scores in stoppage time! (${homeGoals}-${awayGoals})`, team: away.name }); } }
   return { homeGoals, awayGoals, events, score: `${homeGoals}-${awayGoals}` };
 }
 
@@ -140,15 +140,15 @@ export default function FootballManagerLite() {
   }
 
   function signPlayerFromMarket(itemId) {
-    const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transaction échouée: fonds insuffisants pour acheter ${item.player.name} (${price}€)`); return; }
+    const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transfer failed: insufficient funds to buy ${item.player.name} (€${price})`); return; }
     setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players:[...c.players, {...item.player, id: Date.now()}], balance: c.balance - price} : c));
-    setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfert: ${item.player.name} acheté pour ${price}€`);
+    setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfer: ${item.player.name} bought for €${price}`);
   }
 
   function listPlayerForSale(playerId, price) {
     const p = playerClub.players.find(pp=>pp.id===playerId); if(!p) return; const id = `${playerClub.name}-${playerId}-${Date.now()}`;
     setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p}, price }, ...m]);
-    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} mis en vente pour ${price}€`);
+    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} listed for sale for €${price}`);
   }
 
   // find next fixture in current round (first non-played)
@@ -159,7 +159,7 @@ export default function FootballManagerLite() {
   // Start a single match in overlay (prepares stream then plays)
   function startMatchOverlay(fx) {
     const homeClub = clubs.find(c=>c.name===fx.home); const awayClub = clubs.find(c=>c.name===fx.away);
-    if(!homeClub || !awayClub) { pushLog('Impossible de lancer le match: clubs introuvables.'); return; }
+    if(!homeClub || !awayClub) { pushLog('Unable to start match: clubs not found.'); return; }
     const stream = prepareMatchEventStream(homeClub, awayClub, tactics);
     // set overlay state
     setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [] });
@@ -203,7 +203,7 @@ export default function FootballManagerLite() {
       }
       return c;
     }));
-    pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (recettes: ${ticketIncome}€)`);
+    pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (gate: €${ticketIncome})`);
   }
 
   // controls: play/pause, speed change, finish early
@@ -239,8 +239,18 @@ export default function FootballManagerLite() {
   // play match button: takes next fixture in round and starts overlay
   function onPlayMatchButton() {
     const fx = getNextFixtureForRound(currentRound);
-    if(!fx) { pushLog('Aucun match disponible pour ce tour.'); return; }
+    if(!fx) { pushLog('No match available for this round.'); return; }
     startMatchOverlay(fx);
+  }
+
+  function resetSeason() {
+    if (!confirm('Reset the season?')) return;
+    const freshFixtures = generateSeason(clubs);
+    setFixtures(freshFixtures);
+    setCurrentRound(1);
+    setMatchOverlay(null);
+    setLog([]);
+    pushLog('Season reset.');
   }
 
   // UI helpers
@@ -264,17 +274,17 @@ export default function FootballManagerLite() {
             <header className="flex items-center justify-between mb-4">
               <div>
                 <h1 className="text-2xl font-bold">{playerClub.name} — Football Manager Lite</h1>
-                <div className="text-sm text-slate-600">Balance: {Math.round(playerClub.balance).toLocaleString()}€ — Sponsor: {playerClub.sponsor.name} ({playerClub.sponsor.monthly}€/mois)</div>
+                <div className="text-sm text-slate-600">Balance: €{Math.round(playerClub.balance).toLocaleString()} — Sponsor: {playerClub.sponsor.name} (€{playerClub.sponsor.monthly}/month)</div>
               </div>
               <div className="space-x-2">
-                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Entraînement: ${playerClub.players[idx].name} gagne en forme.`); }} className="px-3 py-1 rounded-lg border">Entraînement</button>
-                <button onClick={()=>{ if(confirm('Réinitialiser la saison ?')){ const fresh = generateSeason(clubs); setFixtures(fresh); setCurrentRound(1); setLog([]); pushLog('Saison réinitialisée.'); } }} className="px-3 py-1 rounded-lg border text-red-600">Réinitialiser saison</button>
+                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Training: ${playerClub.players[idx].name} improves form.`); }} className="px-3 py-1 rounded-lg border">Training</button>
+                <button onClick={resetSeason} className="px-3 py-1 rounded-lg border text-red-600">Reset Season</button>
               </div>
             </header>
 
             {/* Squad + Transfers */}
             <section className="mb-4">
-              <h2 className="font-semibold mb-2">Effectif</h2>
+              <h2 className="font-semibold mb-2">Squad</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -282,12 +292,12 @@ export default function FootballManagerLite() {
                       <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
                         <div>
                           <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
-                          <div className="text-sm text-slate-600">Note: {p.rating} — Age: {p.age}</div>
+                          <div className="text-sm text-slate-600">Rating: {p.rating} — Age: {p.age}</div>
                         </div>
                         <div className="flex gap-1">
                           <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
                           <button onClick={()=>changePlayerLocalRating(p.id,1)} className="px-2 py-1 rounded border">+</button>
-                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Vendre</button>
+                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Sell</button>
                         </div>
                       </div>
                     ))}
@@ -295,18 +305,18 @@ export default function FootballManagerLite() {
                 </div>
 
                 <div>
-                  <h3 className="font-medium">Marché des transferts</h3>
+                  <h3 className="font-medium">Transfer Market</h3>
                   <div className="max-h-64 overflow-auto mt-2 border rounded p-2 bg-slate-50">
-                    {market.length===0 ? <div className="text-sm text-slate-500">Aucun joueur en vente pour l'instant.</div> : market.map(m=> (
+                    {market.length===0 ? <div className="text-sm text-slate-500">No players for sale right now.</div> : market.map(m=> (
                       <div key={m.id} className="p-2 rounded border bg-white mb-2">
                         <div className="flex justify-between items-center">
                           <div>
                             <div className="font-medium">{m.player.name} — {m.player.pos}</div>
-                            <div className="text-sm text-slate-600">Depuis: {m.fromClub} — Note: {m.player.rating}</div>
+                            <div className="text-sm text-slate-600">From: {m.fromClub} — Rating: {m.player.rating}</div>
                           </div>
                           <div className="text-right">
                             <div className="font-medium">{m.price}€</div>
-                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Acheter</button>
+                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Buy</button>
                           </div>
                         </div>
                       </div>
@@ -318,31 +328,31 @@ export default function FootballManagerLite() {
 
             {/* Fixtures & Play Match */}
             <section className="mb-4">
-              <h2 className="font-semibold mb-2">Calendrier saisonnier</h2>
+              <h2 className="font-semibold mb-2">Season Schedule</h2>
               <div className="flex gap-2 items-center mb-3">
-                <div>Ronde actuelle: {currentRound}</div>
-                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Jouer le match</button>
+                <div>Current round: {currentRound}</div>
+                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Play Match</button>
               </div>
 
               <div className="max-h-48 overflow-auto border rounded p-2 bg-slate-50">
                 {fixtures.filter(f=> f.round>=currentRound && f.round< currentRound+3).map(f=> (
                   <div key={f.id} className="p-2 rounded border bg-white mb-2">
                     <div className="text-sm">R{f.round} — {f.home} vs {f.away} {f.played ? ` — ${f.result.score}` : ''}</div>
-                    {f.played ? <div className="text-xs text-slate-600">Match déjà joué</div> : null}
+                    {f.played ? <div className="text-xs text-slate-600">Match already played</div> : null}
                   </div>
                 ))}
               </div>
             </section>
 
-            {/* League table */}
+            {/* League Table */}
             <section>
-              <h2 className="font-semibold mb-2">Classement</h2>
+              <h2 className="font-semibold mb-2">League Table</h2>
               <div className="overflow-auto border rounded">
                 <table className="w-full text-sm">
                   <thead className="bg-slate-100">
                     <tr>
                       <th className="p-2 text-left">#</th>
-                      <th className="p-2 text-left">Équipe</th>
+                      <th className="p-2 text-left">Team</th>
                       <th className="p-2">P</th>
                       <th className="p-2">W</th>
                       <th className="p-2">D</th>
@@ -376,41 +386,41 @@ export default function FootballManagerLite() {
           </div>
 
           <div className="mt-4 bg-white rounded-2xl shadow p-4">
-            <h3 className="font-semibold mb-2">Journal & Événements</h3>
+            <h3 className="font-semibold mb-2">Log & Events</h3>
             <div className="max-h-80 overflow-auto border rounded p-2 bg-slate-50">
-              {log.length===0 ? <div className="text-sm text-slate-500">Aucun événement pour l'instant.</div> : log.map((l,i)=> <div key={i} className="text-sm py-0.5">{l}</div>)}
+              {log.length===0 ? <div className="text-sm text-slate-500">No events yet.</div> : log.map((l,i)=> <div key={i} className="text-sm py-0.5">{l}</div>)}
             </div>
           </div>
         </main>
 
         <aside>
           <div className="bg-white rounded-2xl shadow p-4 sticky top-6 w-full">
-            <h3 className="font-semibold">Club rapide</h3>
+            <h3 className="font-semibold">Club snapshot</h3>
             <div className="mt-3 space-y-2">
-              <div>Force de l'équipe: {Math.round(computeTeamStrength(playerClub.players))}</div>
-              <div>Joueurs: {playerClub.players.length}</div>
-              <div>Prix billet: {playerClub.ticketsPrice}€</div>
-              <div>Sponsor: {playerClub.sponsor.name} — {playerClub.sponsor.monthly}€/mois</div>
+              <div>Team strength: {Math.round(computeTeamStrength(playerClub.players))}</div>
+              <div>Players: {playerClub.players.length}</div>
+              <div>Ticket price: {playerClub.ticketsPrice}€</div>
+              <div>Sponsor: {playerClub.sponsor.name} — €{playerClub.sponsor.monthly}/month</div>
             </div>
 
             <div className="mt-4">
-              <h4 className="font-medium">Options rapides</h4>
+              <h4 className="font-medium">Quick actions</h4>
               <div className="flex flex-col gap-2 mt-2">
-                <button onClick={addFreeAgent} className="px-3 py-2 rounded border">Ajouter agent libre</button>
-                <button onClick={quickSponsor} className="px-3 py-2 rounded border">Négocier Sponsor (rapide)</button>
-                <button onClick={adjustTicketPrice} className="px-3 py-2 rounded border">Ajuster prix billet</button>
+                <button onClick={addFreeAgent} className="px-3 py-2 rounded border">Add free agent</button>
+                <button onClick={quickSponsor} className="px-3 py-2 rounded border">Negotiate Sponsor (quick)</button>
+                <button onClick={adjustTicketPrice} className="px-3 py-2 rounded border">Adjust ticket price</button>
               </div>
             </div>
 
             <div className="mt-4">
-              <h4 className="font-medium">Multijoueur local / Ligues</h4>
-              <div className="text-sm text-slate-600 mt-2">La ligue est jouée localement. Pour vrai multijoueur il faut un backend (auth + gestion de parties). Ici, chaque club représente un manager (peut être joué manuellement).</div>
+              <h4 className="font-medium">Local multiplayer / leagues</h4>
+              <div className="text-sm text-slate-600 mt-2">The league runs locally. A real multiplayer mode would need a backend (auth + match management). For now each club represents a manager you can control manually.</div>
             </div>
           </div>
         </aside>
       </div>
 
-      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Prototype — plein écran match feed (Sofascore-like). Clique "Jouer le match" pour lancer un match minute-by-minute.</footer>
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Prototype — fullscreen match feed (Sofascore-like). Click "Play Match" to simulate a minute-by-minute match.</footer>
 
       {/* Fullscreen Match Overlay (Sofascore-like) */}
       {matchOverlay ? (
@@ -423,8 +433,8 @@ export default function FootballManagerLite() {
             </div>
             <div className="flex items-center gap-3">
               <div className="text-sm">{matchOverlay.pointerMinute > 0 ? `${matchOverlay.pointerMinute}’` : `0’`}</div>
-              <button onClick={()=>{ finishMatchNow(); }} className="px-3 py-1 rounded border bg-white/10">Terminer</button>
-              <button onClick={()=>{ closeOverlay(); }} className="px-3 py-1 rounded border bg-white/5">Quitter</button>
+              <button onClick={()=>{ finishMatchNow(); }} className="px-3 py-1 rounded border bg-white/10">Finish</button>
+              <button onClick={()=>{ closeOverlay(); }} className="px-3 py-1 rounded border bg-white/5">Exit</button>
             </div>
           </div>
 
@@ -439,7 +449,7 @@ export default function FootballManagerLite() {
           <div className="flex-1 flex flex-col md:flex-row gap-4 p-4">
             <div className="flex-1 overflow-hidden">
               <div ref={feedRef} className="h-full overflow-auto bg-black/30 rounded p-3">
-                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Le match commence…</div> : matchOverlay.displayedEvents.map((e,i)=> (
+                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Match is starting…</div> : matchOverlay.displayedEvents.map((e,i)=> (
                   <div key={i} className="mb-3 p-2 bg-white/5 rounded">
                     <div className="text-xs text-white/60">{e.minute}’</div>
                     <div className="flex items-center gap-2 mt-1">
@@ -453,18 +463,18 @@ export default function FootballManagerLite() {
 
             <div className="w-full md:w-80">
               <div className="bg-white/5 rounded p-3">
-                <div className="text-sm mb-2">Contrôles</div>
+                <div className="text-sm mb-2">Controls</div>
                 <div className="flex gap-2 mb-3">
-                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶️ Reprendre'}</button>
+                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶️ Resume'}</button>
                   <button onClick={()=>setSpeed(1)} className={`px-3 py-1 rounded border ${matchOverlay.speed===1? 'bg-emerald-500':''}`}>x1</button>
                   <button onClick={()=>setSpeed(2)} className={`px-3 py-1 rounded border ${matchOverlay.speed===2? 'bg-emerald-500':''}`}>x2</button>
                   <button onClick={()=>setSpeed(4)} className={`px-3 py-1 rounded border ${matchOverlay.speed===4? 'bg-emerald-500':''}`}>x4</button>
                 </div>
-                <div className="text-sm mb-2">Résumé</div>
-                <div className="text-xs text-white/70">Score prévu: {matchOverlay.stream.score}</div>
-                <div className="mt-2 text-xs">Événements totaux: {matchOverlay.stream.events.length}</div>
+                <div className="text-sm mb-2">Summary</div>
+                <div className="text-xs text-white/70">Projected score: {matchOverlay.stream.score}</div>
+                <div className="mt-2 text-xs">Total events: {matchOverlay.stream.events.length}</div>
                 <div className="mt-3">
-                  <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Passer à la fin</button>
+                  <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Skip to end</button>
                 </div>
               </div>
             </div>
@@ -474,11 +484,11 @@ export default function FootballManagerLite() {
           {(!matchOverlay.playing && matchOverlay.pointerMinute>=90) ? (
             <div className="p-4 border-t border-white/10 flex items-center justify-between">
               <div>
-                <div className="text-lg font-bold">FIN DU MATCH</div>
-                <div className="text-sm">Score final: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
+                <div className="text-lg font-bold">FULL TIME</div>
+                <div className="text-sm">Final score: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
               </div>
               <div>
-                <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Retour à la saison</button>
+                <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Back to season</button>
               </div>
             </div>
           ) : null}
