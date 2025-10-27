@@ -1,10 +1,18 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+const { useEffect, useMemo, useRef, useState } = React;
+
+const APP_VERSION = 'v1.4.0';
+
+const MENTALITY_PROFILES = {
+  Defensive: { attack: -0.6, defense: 0.9, card: -0.2 },
+  Balanced: { attack: 0, defense: 0, card: 0 },
+  Attacking: { attack: 0.8, defense: -0.5, card: 0.25 },
+};
 
 // Football Manager Lite — Sofascore fullscreen match feed
 // Changes requested by user:
-// - Rename "Jouer la ronde" -> "Jouer le match"
+// - Rename "Jouer la ronde" -> "Play Match"
 // - Remove "Simuler saison complète"
-// - When "Jouer le match" is clicked, open a fullscreen Sofascore-like feed
+// - When "Play Match" is clicked, open a fullscreen Sofascore-like feed
 //   that simulates the match minute-by-minute over ~5 minutes in realtime.
 // - Support speed controls: x1 (default ~3.333s per match minute), x2, x4
 // - Feed shows events with minute stamps, auto-scroll and animations (CSS),
@@ -30,12 +38,154 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 
 function computeTeamStrength(players) {
   const weight = { GK: 0.9, CB: 1.0, LB: 0.95, RB: 0.95, CM: 1.05, AM: 1.05, LW: 1.1, RW: 1.1, ST: 1.15 };
   const sum = players.reduce((s, p) => s + p.rating * (weight[p.pos] || 1), 0);
   return sum / players.length;
+}
+
+function selectStartingXI(club) {
+  return clone(club.players)
+    .sort((a, b) => b.rating - a.rating)
+    .slice(0, 11);
+}
+
+function getClubRank(clubName, table) {
+  const index = table.findIndex((row) => row.team === clubName);
+  return index === -1 ? null : index + 1;
+}
+
+function getRecentForm(clubName, fixtures, limit = 5) {
+  const played = fixtures
+    .filter((f) => f.played && (f.home === clubName || f.away === clubName))
+    .sort((a, b) => b.round - a.round || (b.id > a.id ? 1 : -1));
+  return played.slice(0, limit).map((fixture) => {
+    const { homeGoals, awayGoals } = fixture.result;
+    const isHome = fixture.home === clubName;
+    const goalsFor = isHome ? homeGoals : awayGoals;
+    const goalsAgainst = isHome ? awayGoals : homeGoals;
+    if (goalsFor > goalsAgainst) return 'W';
+    if (goalsFor < goalsAgainst) return 'L';
+    return 'D';
+  });
+}
+
+function getFormScore(formArray) {
+  if (!formArray.length) return 0;
+  return formArray.reduce((total, result) => {
+    if (result === 'W') return total + 3;
+    if (result === 'D') return total + 1;
+    return total;
+  }, 0) / formArray.length;
+}
+
+function pickOpponentMentality(club, opponent, leagueTable) {
+  const clubStrength = computeTeamStrength(selectStartingXI(club));
+  const opponentStrength = computeTeamStrength(selectStartingXI(opponent));
+  const clubRank = getClubRank(club.name, leagueTable) || leagueTable.length / 2;
+  const opponentRank = getClubRank(opponent.name, leagueTable) || leagueTable.length / 2;
+
+  if (clubStrength > opponentStrength + 8 && (clubRank || 10) < (opponentRank || 10)) {
+    return 'Attacking';
+  }
+  if (clubStrength + 6 < opponentStrength && (clubRank || 10) > (opponentRank || 10)) {
+    return 'Defensive';
+  }
+  return 'Balanced';
+}
+
+function formatFormString(formArray) {
+  return formArray && formArray.length ? formArray.join(' ') : 'No matches yet';
+}
+
+function deriveOdds(homeClub, awayClub, leagueTable, fixtures) {
+  const homeStrength = computeTeamStrength(selectStartingXI(homeClub));
+  const awayStrength = computeTeamStrength(selectStartingXI(awayClub));
+  const homeRank = getClubRank(homeClub.name, leagueTable) || Math.ceil(leagueTable.length / 2) || 4;
+  const awayRank = getClubRank(awayClub.name, leagueTable) || Math.ceil(leagueTable.length / 2) || 4;
+  const homeForm = getFormScore(getRecentForm(homeClub.name, fixtures));
+  const awayForm = getFormScore(getRecentForm(awayClub.name, fixtures));
+
+  const ratingDiff = clamp((homeStrength - awayStrength) / 10, -2, 2);
+  const rankDiff = clamp((awayRank - homeRank) / 5, -2, 2);
+  const formDiff = clamp((homeForm - awayForm) / 3, -1.5, 1.5);
+
+  let homeProb = 0.38 + ratingDiff * 0.06 - rankDiff * 0.04 + formDiff * 0.03;
+  let awayProb = 0.32 - ratingDiff * 0.06 + rankDiff * 0.04 - formDiff * 0.03;
+  let drawProb = 0.3;
+
+  homeProb = clamp(homeProb, 0.15, 0.7);
+  awayProb = clamp(awayProb, 0.15, 0.7);
+  drawProb = clamp(drawProb + clamp(0.5 - (homeProb + awayProb), -0.1, 0.1), 0.1, 0.4);
+
+  const total = homeProb + awayProb + drawProb;
+  homeProb /= total;
+  awayProb /= total;
+  drawProb /= total;
+
+  const toOdds = (prob) => (prob <= 0 ? '—' : (1 / prob).toFixed(2));
+
+  return {
+    homeProb,
+    awayProb,
+    drawProb,
+    homeOdds: toOdds(homeProb),
+    awayOdds: toOdds(awayProb),
+    drawOdds: toOdds(drawProb),
+  };
+}
+
+function computeMatchStatsForMinute(events, possessionLog, minute, homeName, awayName) {
+  const upto = minute <= 0 ? 0 : minute;
+  const stats = {
+    home: { shots: 0, shotsOnTarget: 0, xg: 0, yellowCards: 0, possession: 0, goals: 0 },
+    away: { shots: 0, shotsOnTarget: 0, xg: 0, yellowCards: 0, possession: 0, goals: 0 },
+  };
+
+  possessionLog
+    .filter((entry) => entry.minute <= upto)
+    .forEach((entry) => {
+      stats[entry.team === homeName ? 'home' : 'away'].possession += entry.share;
+    });
+
+  events
+    .filter((event) => event.minute <= upto)
+    .forEach((event) => {
+      const side = event.team === homeName ? 'home' : 'away';
+      if (event.kind === 'goal' || event.kind === 'shot') {
+        stats[side].shots += 1;
+        if (event.onTarget || event.kind === 'goal') {
+          stats[side].shotsOnTarget += 1;
+        }
+        if (typeof event.xg === 'number') {
+          stats[side].xg += event.xg;
+        }
+        if (event.kind === 'goal') {
+          stats[side].goals += 1;
+        }
+      }
+      if (event.kind === 'yellow-card') {
+        stats[side].yellowCards += 1;
+      }
+    });
+
+  const totalPoss = stats.home.possession + stats.away.possession || 1;
+  stats.home.possession = Math.round((stats.home.possession / totalPoss) * 100);
+  stats.away.possession = Math.round((stats.away.possession / totalPoss) * 100);
+  if (upto === 0) {
+    stats.home.possession = 50;
+    stats.away.possession = 50;
+  }
+  stats.home.xg = Number(stats.home.xg.toFixed(2));
+  stats.away.xg = Number(stats.away.xg.toFixed(2));
+
+  return stats;
 }
 
 function generateSeason(clubs) {
@@ -57,42 +207,136 @@ function generateSeason(clubs) {
   return fixtures;
 }
 
-// Create a full event stream for a match: returns {homeGoals, awayGoals, events}
-function prepareMatchEventStream(home, away, tactics = {}) {
+// Create a full event stream for a match with live stats
+function prepareMatchEventStream(home, away, context = {}) {
   const events = [];
-  const homeStrength = computeTeamStrength(home.players) + (tactics.homeAttack - tactics.awayDefense) * 0.6;
-  const awayStrength = computeTeamStrength(away.players) + (tactics.awayAttack - tactics.homeDefense) * 0.6;
-  const total = Math.max(1, homeStrength + awayStrength);
-  const homeAttackRate = (homeStrength / total) * 12 + Math.random() * 2;
-  const awayAttackRate = (awayStrength / total) * 10 + Math.random() * 2;
-  let homeGoals = 0; let awayGoals = 0;
+  const possessionLog = [];
+  const homeLineup = context.homeLineup || selectStartingXI(home);
+  const awayLineup = context.awayLineup || selectStartingXI(away);
+  const homeMentality = context.homeMentality || 'Balanced';
+  const awayMentality = context.awayMentality || 'Balanced';
+  const homeProfile = MENTALITY_PROFILES[homeMentality] || MENTALITY_PROFILES.Balanced;
+  const awayProfile = MENTALITY_PROFILES[awayMentality] || MENTALITY_PROFILES.Balanced;
+
+  const baseHomeStrength = computeTeamStrength(homeLineup);
+  const baseAwayStrength = computeTeamStrength(awayLineup);
+  const homeStrength = baseHomeStrength + homeProfile.attack * 1.8 - awayProfile.defense * 0.8 + (context.homeFormBoost || 0);
+  const awayStrength = baseAwayStrength + awayProfile.attack * 1.8 - homeProfile.defense * 0.8 + (context.awayFormBoost || 0);
+  const defensiveShieldHome = baseHomeStrength + homeProfile.defense * 1.5;
+  const defensiveShieldAway = baseAwayStrength + awayProfile.defense * 1.5;
+
+  let homeGoals = 0;
+  let awayGoals = 0;
+  let sequenceCounter = 0;
+
+  function registerShot({ minute, isHome, onTargetChance, goalChance }) {
+    const lineup = isHome ? homeLineup : awayLineup;
+    const team = isHome ? home : away;
+    const opponent = isHome ? away : home;
+    const profile = isHome ? homeProfile : awayProfile;
+    const shooter = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+    const onTargetProbability = clamp(onTargetChance + profile.attack * 0.04, 0.18, 0.82);
+    const chanceOnTarget = Math.random() < onTargetProbability;
+    const goalProbability = clamp(goalChance + profile.attack * 0.03 - (isHome ? awayProfile.defense : homeProfile.defense) * 0.025, 0.05, 0.65);
+    const xg = clamp(goalProbability + Math.random() * 0.08, 0.03, 0.85);
+    const isGoal = chanceOnTarget && Math.random() < goalProbability;
+
+    if (isGoal) {
+      if (isHome) homeGoals += 1; else awayGoals += 1;
+    }
+
+    const outcomeText = isGoal
+      ? `${team.name} scores! ${shooter.name} finds the net. (${homeGoals}-${awayGoals})`
+      : chanceOnTarget
+        ? `${shooter.name} forces a save from ${opponent.name}.`
+        : `${shooter.name} drags the attempt wide.`;
+
+    events.push({
+      minute,
+      team: team.name,
+      opponent: opponent.name,
+      kind: isGoal ? 'goal' : 'shot',
+      onTarget: chanceOnTarget || isGoal,
+      xg,
+      player: shooter.name,
+      text: outcomeText,
+      scoreboard: { homeGoals, awayGoals },
+      sequence: sequenceCounter += 1,
+    });
+  }
 
   for (let minute = 1; minute <= 90; minute++) {
-    // give minutes some distribution: early/late -> slightly different rates
-    const timeFactor = 1 + (Math.sin((minute / 90) * Math.PI) * 0.25);
-    if (Math.random() < (homeAttackRate / 90) * timeFactor) {
-      if (Math.random() < 0.22 + (homeStrength - awayStrength) / 400) {
-        homeGoals++; events.push({ minute, type: 'goal', text: `${home.name} marque! (${homeGoals}-${awayGoals})`, team: home.name });
-      } else {
-        events.push({ minute, type: 'chance', text: `${home.name} manque une occasion.`, team: home.name });
-      }
+    const tempo = 1 + Math.sin((minute / 90) * Math.PI) * 0.18;
+    const homePossChance = clamp(0.5 + (homeStrength - awayStrength) / 190 + homeProfile.attack * 0.05 - awayProfile.attack * 0.02, 0.34, 0.7);
+    const hasHomeBall = Math.random() < homePossChance;
+    possessionLog.push({ minute, team: hasHomeBall ? home.name : away.name, share: 1 });
+
+    const homeAttackChance = clamp(0.08 + (homeStrength - awayStrength) / 220 + homeProfile.attack * 0.035 - awayProfile.defense * 0.02, 0.04, 0.22);
+    const awayAttackChance = clamp(0.08 + (awayStrength - homeStrength) / 220 + awayProfile.attack * 0.035 - homeProfile.defense * 0.02, 0.04, 0.22);
+
+    if (Math.random() < homeAttackChance * tempo * (hasHomeBall ? 1.1 : 0.9)) {
+      const onTargetChance = 0.35 + (homeStrength - defensiveShieldAway) / 250;
+      const goalChance = 0.18 + (homeStrength - defensiveShieldAway) / 260;
+      registerShot({ minute, isHome: true, onTargetChance, goalChance });
     }
-    if (Math.random() < (awayAttackRate / 90) * timeFactor) {
-      if (Math.random() < 0.2 + (awayStrength - homeStrength) / 400) {
-        awayGoals++; events.push({ minute, type: 'goal', text: `${away.name} marque! (${homeGoals}-${awayGoals})`, team: away.name });
-      } else {
-        events.push({ minute, type: 'chance', text: `${away.name} manque une occasion.`, team: away.name });
-      }
+
+    if (Math.random() < awayAttackChance * tempo * (!hasHomeBall ? 1.1 : 0.9)) {
+      const onTargetChance = 0.33 + (awayStrength - defensiveShieldHome) / 250;
+      const goalChance = 0.17 + (awayStrength - defensiveShieldHome) / 260;
+      registerShot({ minute, isHome: false, onTargetChance, goalChance });
     }
-    if (Math.random() < 0.005) events.push({ minute, type: 'card', text: `Carton jaune — contact dur.`, team: (Math.random()<0.5?home.name:away.name) });
-    if (Math.random() < 0.002) events.push({ minute, type: 'injury', text: `Blessure: joueur remplacé.`, team: (Math.random()<0.5?home.name:away.name) });
+
+    const cardBase = 0.012 + Math.abs(homeProfile.card) * 0.004 + Math.abs(awayProfile.card) * 0.004;
+    if (Math.random() < cardBase) {
+      const isHomeCard = Math.random() < clamp(0.5 + homeProfile.card * 0.3 - awayProfile.card * 0.1, 0.25, 0.75);
+      const lineup = isHomeCard ? homeLineup : awayLineup;
+      const team = isHomeCard ? home : away;
+      const player = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+      events.push({
+        minute,
+        team: team.name,
+        kind: 'yellow-card',
+        text: `Yellow card for ${player.name} (${team.name}).`,
+        sequence: sequenceCounter += 1,
+      });
+    }
+
+    if (Math.random() < 0.003) {
+      const isHomeInjury = Math.random() < 0.5;
+      const lineup = isHomeInjury ? homeLineup : awayLineup;
+      const team = isHomeInjury ? home : away;
+      const player = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+      events.push({
+        minute,
+        team: team.name,
+        kind: 'injury',
+        text: `${player.name} picks up a knock and needs treatment.`,
+        sequence: sequenceCounter += 1,
+      });
+    }
   }
-  if (Math.random() < 0.03) { if (Math.random() < 0.5) { homeGoals++; events.push({ minute: 90, type: 'goal', text: `${home.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: home.name }); } else { awayGoals++; events.push({ minute: 90, type: 'goal', text: `${away.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: away.name }); } }
-  return { homeGoals, awayGoals, events, score: `${homeGoals}-${awayGoals}` };
+
+  if (Math.random() < 0.04) {
+    const isHome = Math.random() < 0.5;
+    const minute = 90;
+    const onTargetChance = isHome ? 0.4 + (homeStrength - defensiveShieldAway) / 250 : 0.38 + (awayStrength - defensiveShieldHome) / 250;
+    const goalChance = isHome ? 0.22 + (homeStrength - defensiveShieldAway) / 250 : 0.21 + (awayStrength - defensiveShieldHome) / 250;
+    registerShot({ minute, isHome, onTargetChance, goalChance });
+  }
+
+  return {
+    homeGoals,
+    awayGoals,
+    events: events.sort((a, b) => (a.minute === b.minute ? a.sequence - b.sequence : a.minute - b.minute)),
+    score: `${homeGoals}-${awayGoals}`,
+    possessionLog,
+    lineups: { home: homeLineup, away: awayLineup },
+    mentalities: { home: homeMentality, away: awayMentality },
+  };
 }
 
 // --------------------------- COMPONENT ---------------------------
-export default function FootballManagerLite() {
+function FootballManagerLite() {
   const [clubs, setClubs] = useState(() => {
     const raw = localStorage.getItem('fm_clubs');
     if (raw) return JSON.parse(raw);
@@ -117,13 +361,14 @@ export default function FootballManagerLite() {
   });
 
   const [log, setLog] = useState(()=>{ const raw = localStorage.getItem('fm_log'); return raw?JSON.parse(raw):[]; });
-  const [tactics, setTactics] = useState({ homeAttack:5, homeDefense:5, awayAttack:5, awayDefense:5 });
+  const [mentality, setMentality] = useState(()=> localStorage.getItem('fm_mentality') || 'Balanced');
   const [currentRound, setCurrentRound] = useState(()=>{ const raw = localStorage.getItem('fm_currentRound'); return raw?Number(raw):1; });
 
   useEffect(()=>{ localStorage.setItem('fm_clubs', JSON.stringify(clubs)); }, [clubs]);
   useEffect(()=>{ localStorage.setItem('fm_fixtures_full', JSON.stringify(fixtures)); }, [fixtures]);
   useEffect(()=>{ localStorage.setItem('fm_market', JSON.stringify(market)); }, [market]);
   useEffect(()=>{ localStorage.setItem('fm_log', JSON.stringify(log)); }, [log]);
+  useEffect(()=>{ localStorage.setItem('fm_mentality', mentality); }, [mentality]);
   useEffect(()=>{ localStorage.setItem('fm_currentRound', String(currentRound)); }, [currentRound]);
 
   // --- Sofascore fullscreen state ---
@@ -140,15 +385,15 @@ export default function FootballManagerLite() {
   }
 
   function signPlayerFromMarket(itemId) {
-    const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transaction échouée: fonds insuffisants pour acheter ${item.player.name} (${price}€)`); return; }
+    const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transfer failed: insufficient funds to buy ${item.player.name} (€${price})`); return; }
     setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players:[...c.players, {...item.player, id: Date.now()}], balance: c.balance - price} : c));
-    setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfert: ${item.player.name} acheté pour ${price}€`);
+    setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfer: ${item.player.name} bought for €${price}`);
   }
 
   function listPlayerForSale(playerId, price) {
     const p = playerClub.players.find(pp=>pp.id===playerId); if(!p) return; const id = `${playerClub.name}-${playerId}-${Date.now()}`;
     setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p}, price }, ...m]);
-    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} mis en vente pour ${price}€`);
+    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} listed for sale for €${price}`);
   }
 
   // find next fixture in current round (first non-played)
@@ -156,13 +401,31 @@ export default function FootballManagerLite() {
     return fixtures.find(f=> f.round===round && !f.played) || null;
   }
 
+  function buildMatchContext(homeClub, awayClub) {
+    const homeLineup = selectStartingXI(homeClub);
+    const awayLineup = selectStartingXI(awayClub);
+    const homeMentality = homeClub.id === playerClub.id ? mentality : pickOpponentMentality(homeClub, awayClub, leagueTable);
+    const awayMentality = awayClub.id === playerClub.id ? mentality : pickOpponentMentality(awayClub, homeClub, leagueTable);
+    const homeForm = getFormScore(getRecentForm(homeClub.name, fixtures));
+    const awayForm = getFormScore(getRecentForm(awayClub.name, fixtures));
+    return {
+      homeLineup,
+      awayLineup,
+      homeMentality,
+      awayMentality,
+      homeFormBoost: (homeForm - 1.5) * 1.2,
+      awayFormBoost: (awayForm - 1.5) * 1.2,
+    };
+  }
+
   // Start a single match in overlay (prepares stream then plays)
   function startMatchOverlay(fx) {
     const homeClub = clubs.find(c=>c.name===fx.home); const awayClub = clubs.find(c=>c.name===fx.away);
-    if(!homeClub || !awayClub) { pushLog('Impossible de lancer le match: clubs introuvables.'); return; }
-    const stream = prepareMatchEventStream(homeClub, awayClub, tactics);
+    if(!homeClub || !awayClub) { pushLog('Unable to start match: clubs not found.'); return; }
+    const context = buildMatchContext(homeClub, awayClub);
+    const stream = prepareMatchEventStream(homeClub, awayClub, context);
     // set overlay state
-    setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [] });
+    setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [], context });
   }
 
   // internal: advance one simulated minute (adds events for that minute to displayedEvents)
@@ -173,12 +436,13 @@ export default function FootballManagerLite() {
       const eventsThisMinute = mo.stream.events.filter(e=> e.minute === nextMinute);
       const displayed = [...mo.displayedEvents, ...eventsThisMinute.map(e=> ({...e}))];
       // update score from stream by filtering events up to nextMinute
-      const homeGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.home.name && e.minute <= nextMinute).length;
-      const awayGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.away.name && e.minute <= nextMinute).length;
+      const homeGoalsSoFar = mo.stream.events.filter(e=> e.kind==='goal' && e.team === mo.home.name && e.minute <= nextMinute).length;
+      const awayGoalsSoFar = mo.stream.events.filter(e=> e.kind==='goal' && e.team === mo.away.name && e.minute <= nextMinute).length;
       // if match finished (90), mark played and apply econ/results
       if (nextMinute >= 90) {
         // finalize: mark fixture played and update clubs (income & ratings)
-        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events });
+        const stats = computeMatchStatsForMinute(mo.stream.events, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
+        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events, stats });
         return { ...mo, pointerMinute: 90, displayedEvents: displayed, playing: false };
       }
       return { ...mo, pointerMinute: nextMinute, displayedEvents: displayed };
@@ -186,8 +450,9 @@ export default function FootballManagerLite() {
   }
 
   function finalizeMatch(fixtureId, homeClub, awayClub, result) {
+    const enrichedResult = { ...result, score: `${result.homeGoals}-${result.awayGoals}` };
     // update fixtures
-    setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result } : f));
+    setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result: enrichedResult } : f));
     // apply ticket income to home
     const attendance = Math.max(2000, Math.round(5000 + computeTeamStrength(homeClub.players) * 15 + randInt(-1000,1000)));
     const ticketIncome = Math.round(attendance * Math.max(1, homeClub.ticketsPrice));
@@ -203,7 +468,7 @@ export default function FootballManagerLite() {
       }
       return c;
     }));
-    pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (recettes: ${ticketIncome}€)`);
+    pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (gate: €${ticketIncome})`);
   }
 
   // controls: play/pause, speed change, finish early
@@ -231,7 +496,21 @@ export default function FootballManagerLite() {
   function setSpeed(s) { setMatchOverlay(mo => mo ? { ...mo, speed: s } : mo); }
   function finishMatchNow() {
     // show all remaining events and finalize
-    setMatchOverlay(mo=>{ if(!mo) return mo; const all = mo.stream.events; const homeGoals = all.filter(e=>e.type==='goal' && e.team===mo.home.name).length; const awayGoals = all.filter(e=>e.type==='goal' && e.team===mo.away.name).length; finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all }); return { ...mo, pointerMinute: 90, displayedEvents: [...mo.displayedEvents, ...all.filter(e=> e.minute > mo.pointerMinute)], playing: false }; });
+    setMatchOverlay(mo=>{
+      if(!mo) return mo;
+      const all = mo.stream.events;
+      const homeGoals = all.filter(e=>e.kind==='goal' && e.team===mo.home.name).length;
+      const awayGoals = all.filter(e=>e.kind==='goal' && e.team===mo.away.name).length;
+      const stats = computeMatchStatsForMinute(all, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
+      finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all, stats });
+      const merged = new Map();
+      [...mo.displayedEvents, ...all].forEach(ev=>{
+        const key = `${ev.minute}-${ev.sequence || ev.player || ev.text}-${ev.team}`;
+        merged.set(key, { ...ev });
+      });
+      const ordered = Array.from(merged.values()).sort((a,b)=> a.minute === b.minute ? ((a.sequence||0) - (b.sequence||0)) : a.minute - b.minute);
+      return { ...mo, pointerMinute: 90, displayedEvents: ordered, playing: false };
+    });
   }
 
   function closeOverlay() { setMatchOverlay(null); }
@@ -239,8 +518,18 @@ export default function FootballManagerLite() {
   // play match button: takes next fixture in round and starts overlay
   function onPlayMatchButton() {
     const fx = getNextFixtureForRound(currentRound);
-    if(!fx) { pushLog('Aucun match disponible pour ce tour.'); return; }
+    if(!fx) { pushLog('No match available for this round.'); return; }
     startMatchOverlay(fx);
+  }
+
+  function resetSeason() {
+    if (!confirm('Reset the season?')) return;
+    const freshFixtures = generateSeason(clubs);
+    setFixtures(freshFixtures);
+    setCurrentRound(1);
+    setMatchOverlay(null);
+    setLog([]);
+    pushLog('Season reset.');
   }
 
   // UI helpers
@@ -255,6 +544,46 @@ export default function FootballManagerLite() {
     return Object.values(table).sort((a,b)=> b.Pts - a.Pts || b.GD - a.GD || b.GF - a.GF);
   }, [clubs, fixtures]);
 
+  const nextFixture = useMemo(()=> getNextFixtureForRound(), [fixtures, currentRound]);
+
+  const matchPreview = useMemo(()=>{
+    if(!nextFixture) return null;
+    const homeClub = clubs.find(c=> c.name === nextFixture.home);
+    const awayClub = clubs.find(c=> c.name === nextFixture.away);
+    if(!homeClub || !awayClub) return null;
+    const context = buildMatchContext(homeClub, awayClub);
+    const odds = deriveOdds(homeClub, awayClub, leagueTable, fixtures);
+    return {
+      fixture: nextFixture,
+      home: {
+        club: homeClub,
+        lineup: context.homeLineup,
+        rank: getClubRank(homeClub.name, leagueTable),
+        form: getRecentForm(homeClub.name, fixtures),
+        mentality: context.homeMentality,
+        avgRating: Math.round(computeTeamStrength(context.homeLineup)),
+      },
+      away: {
+        club: awayClub,
+        lineup: context.awayLineup,
+        rank: getClubRank(awayClub.name, leagueTable),
+        form: getRecentForm(awayClub.name, fixtures),
+        mentality: context.awayMentality,
+        avgRating: Math.round(computeTeamStrength(context.awayLineup)),
+      },
+      odds,
+      playerSide: homeClub.id === playerClub.id ? 'home' : awayClub.id === playerClub.id ? 'away' : null,
+    };
+  }, [nextFixture, clubs, leagueTable, fixtures, mentality, playerClub]);
+
+  const liveStats = (matchOverlay && matchOverlay.stream && matchOverlay.stream.possessionLog) ? computeMatchStatsForMinute(
+    matchOverlay.stream.events,
+    matchOverlay.stream.possessionLog,
+    matchOverlay.pointerMinute,
+    matchOverlay.home.name,
+    matchOverlay.away.name,
+  ) : null;
+
   // render
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white p-6 font-sans">
@@ -264,17 +593,17 @@ export default function FootballManagerLite() {
             <header className="flex items-center justify-between mb-4">
               <div>
                 <h1 className="text-2xl font-bold">{playerClub.name} — Football Manager Lite</h1>
-                <div className="text-sm text-slate-600">Balance: {Math.round(playerClub.balance).toLocaleString()}€ — Sponsor: {playerClub.sponsor.name} ({playerClub.sponsor.monthly}€/mois)</div>
+                <div className="text-sm text-slate-600">Balance: €{Math.round(playerClub.balance).toLocaleString()} — Sponsor: {playerClub.sponsor.name} (€{playerClub.sponsor.monthly}/month)</div>
               </div>
               <div className="space-x-2">
-                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Entraînement: ${playerClub.players[idx].name} gagne en forme.`); }} className="px-3 py-1 rounded-lg border">Entraînement</button>
-                <button onClick={()=>{ if(confirm('Réinitialiser la saison ?')){ const fresh = generateSeason(clubs); setFixtures(fresh); setCurrentRound(1); setLog([]); pushLog('Saison réinitialisée.'); } }} className="px-3 py-1 rounded-lg border text-red-600">Réinitialiser saison</button>
+                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Training: ${playerClub.players[idx].name} improves form.`); }} className="px-3 py-1 rounded-lg border">Training</button>
+                <button onClick={resetSeason} className="px-3 py-1 rounded-lg border text-red-600">Reset Season</button>
               </div>
             </header>
 
             {/* Squad + Transfers */}
             <section className="mb-4">
-              <h2 className="font-semibold mb-2">Effectif</h2>
+              <h2 className="font-semibold mb-2">Squad</h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -282,12 +611,12 @@ export default function FootballManagerLite() {
                       <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
                         <div>
                           <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
-                          <div className="text-sm text-slate-600">Note: {p.rating} — Age: {p.age}</div>
+                          <div className="text-sm text-slate-600">Rating: {p.rating} — Age: {p.age}</div>
                         </div>
                         <div className="flex gap-1">
                           <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
                           <button onClick={()=>changePlayerLocalRating(p.id,1)} className="px-2 py-1 rounded border">+</button>
-                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Vendre</button>
+                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Sell</button>
                         </div>
                       </div>
                     ))}
@@ -295,18 +624,18 @@ export default function FootballManagerLite() {
                 </div>
 
                 <div>
-                  <h3 className="font-medium">Marché des transferts</h3>
+                  <h3 className="font-medium">Transfer Market</h3>
                   <div className="max-h-64 overflow-auto mt-2 border rounded p-2 bg-slate-50">
-                    {market.length===0 ? <div className="text-sm text-slate-500">Aucun joueur en vente pour l'instant.</div> : market.map(m=> (
+                    {market.length===0 ? <div className="text-sm text-slate-500">No players for sale right now.</div> : market.map(m=> (
                       <div key={m.id} className="p-2 rounded border bg-white mb-2">
                         <div className="flex justify-between items-center">
                           <div>
                             <div className="font-medium">{m.player.name} — {m.player.pos}</div>
-                            <div className="text-sm text-slate-600">Depuis: {m.fromClub} — Note: {m.player.rating}</div>
+                            <div className="text-sm text-slate-600">From: {m.fromClub} — Rating: {m.player.rating}</div>
                           </div>
                           <div className="text-right">
                             <div className="font-medium">{m.price}€</div>
-                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Acheter</button>
+                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Buy</button>
                           </div>
                         </div>
                       </div>
@@ -318,31 +647,108 @@ export default function FootballManagerLite() {
 
             {/* Fixtures & Play Match */}
             <section className="mb-4">
-              <h2 className="font-semibold mb-2">Calendrier saisonnier</h2>
+              <h2 className="font-semibold mb-2">Season Schedule</h2>
               <div className="flex gap-2 items-center mb-3">
-                <div>Ronde actuelle: {currentRound}</div>
-                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Jouer le match</button>
+                <div>Current round: {currentRound}</div>
+                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Play Match</button>
               </div>
 
               <div className="max-h-48 overflow-auto border rounded p-2 bg-slate-50">
                 {fixtures.filter(f=> f.round>=currentRound && f.round< currentRound+3).map(f=> (
                   <div key={f.id} className="p-2 rounded border bg-white mb-2">
                     <div className="text-sm">R{f.round} — {f.home} vs {f.away} {f.played ? ` — ${f.result.score}` : ''}</div>
-                    {f.played ? <div className="text-xs text-slate-600">Match déjà joué</div> : null}
+                    {f.played ? <div className="text-xs text-slate-600">Match already played</div> : null}
                   </div>
                 ))}
               </div>
             </section>
 
-            {/* League table */}
+            {matchPreview ? (
+              <section className="mb-4">
+                <h2 className="font-semibold mb-2">Match Preview</h2>
+                <div className="border rounded-lg bg-slate-50 p-3">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm text-slate-500 mb-1">Home</div>
+                      <div className="text-lg font-semibold">{matchPreview.home.club.name}</div>
+                      <div className="text-sm text-slate-600">League rank: {matchPreview.home.rank || '—'}</div>
+                      <div className="text-sm text-slate-600">XI rating: {matchPreview.home.avgRating}</div>
+                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.home.form)}</div>
+                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.home.club.id === playerClub.id ? mentality : matchPreview.home.mentality}</div>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">Odds & Strategy</div>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between"><span>Home</span><span>{matchPreview.odds.homeOdds}</span></div>
+                        <div className="flex justify-between"><span>Draw</span><span>{matchPreview.odds.drawOdds}</span></div>
+                        <div className="flex justify-between"><span>Away</span><span>{matchPreview.odds.awayOdds}</span></div>
+                      </div>
+                      {matchPreview.playerSide ? (
+                        <div className="mt-3">
+                          <div className="text-xs text-slate-500">Adjust team mentality</div>
+                          <div className="flex gap-2 mt-2">
+                            {['Defensive','Balanced','Attacking'].map(option => (
+                              <button
+                                key={option}
+                                onClick={()=> setMentality(option)}
+                                className={`px-3 py-1 rounded border ${mentality===option ? 'bg-emerald-500 text-white border-transparent' : ''}`}
+                              >
+                                {option}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-2">Risk profile shifts chance of scoring or conceding.</div>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-500 mt-3">You are observing this match as a neutral manager.</div>
+                      )}
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm text-slate-500 mb-1">Away</div>
+                      <div className="text-lg font-semibold">{matchPreview.away.club.name}</div>
+                      <div className="text-sm text-slate-600">League rank: {matchPreview.away.rank || '—'}</div>
+                      <div className="text-sm text-slate-600">XI rating: {matchPreview.away.avgRating}</div>
+                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.away.form)}</div>
+                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.away.club.id === playerClub.id ? mentality : matchPreview.away.mentality}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">{matchPreview.home.club.name} XI</div>
+                      <div className="space-y-1 text-xs text-slate-600">
+                        {matchPreview.home.lineup.map(player => (
+                          <div key={player.id} className="flex justify-between">
+                            <span>{player.name} ({player.pos})</span>
+                            <span>{player.rating}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">{matchPreview.away.club.name} XI</div>
+                      <div className="space-y-1 text-xs text-slate-600">
+                        {matchPreview.away.lineup.map(player => (
+                          <div key={player.id} className="flex justify-between">
+                            <span>{player.name} ({player.pos})</span>
+                            <span>{player.rating}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {/* League Table */}
             <section>
-              <h2 className="font-semibold mb-2">Classement</h2>
+              <h2 className="font-semibold mb-2">League Table</h2>
               <div className="overflow-auto border rounded">
                 <table className="w-full text-sm">
                   <thead className="bg-slate-100">
                     <tr>
                       <th className="p-2 text-left">#</th>
-                      <th className="p-2 text-left">Équipe</th>
+                      <th className="p-2 text-left">Team</th>
                       <th className="p-2">P</th>
                       <th className="p-2">W</th>
                       <th className="p-2">D</th>
@@ -376,55 +782,68 @@ export default function FootballManagerLite() {
           </div>
 
           <div className="mt-4 bg-white rounded-2xl shadow p-4">
-            <h3 className="font-semibold mb-2">Journal & Événements</h3>
+            <h3 className="font-semibold mb-2">Log & Events</h3>
             <div className="max-h-80 overflow-auto border rounded p-2 bg-slate-50">
-              {log.length===0 ? <div className="text-sm text-slate-500">Aucun événement pour l'instant.</div> : log.map((l,i)=> <div key={i} className="text-sm py-0.5">{l}</div>)}
+              {log.length===0 ? <div className="text-sm text-slate-500">No events yet.</div> : log.map((l,i)=> <div key={i} className="text-sm py-0.5">{l}</div>)}
             </div>
           </div>
         </main>
 
         <aside>
           <div className="bg-white rounded-2xl shadow p-4 sticky top-6 w-full">
-            <h3 className="font-semibold">Club rapide</h3>
+            <h3 className="font-semibold">Club snapshot</h3>
             <div className="mt-3 space-y-2">
-              <div>Force de l'équipe: {Math.round(computeTeamStrength(playerClub.players))}</div>
-              <div>Joueurs: {playerClub.players.length}</div>
-              <div>Prix billet: {playerClub.ticketsPrice}€</div>
-              <div>Sponsor: {playerClub.sponsor.name} — {playerClub.sponsor.monthly}€/mois</div>
+              <div>Team strength: {Math.round(computeTeamStrength(playerClub.players))}</div>
+              <div>Players: {playerClub.players.length}</div>
+              <div>Ticket price: {playerClub.ticketsPrice}€</div>
+              <div>Sponsor: {playerClub.sponsor.name} — €{playerClub.sponsor.monthly}/month</div>
             </div>
 
             <div className="mt-4">
-              <h4 className="font-medium">Options rapides</h4>
+              <h4 className="font-medium">Quick actions</h4>
               <div className="flex flex-col gap-2 mt-2">
-                <button onClick={addFreeAgent} className="px-3 py-2 rounded border">Ajouter agent libre</button>
-                <button onClick={quickSponsor} className="px-3 py-2 rounded border">Négocier Sponsor (rapide)</button>
-                <button onClick={adjustTicketPrice} className="px-3 py-2 rounded border">Ajuster prix billet</button>
+                <button onClick={addFreeAgent} className="px-3 py-2 rounded border">Add free agent</button>
+                <button onClick={quickSponsor} className="px-3 py-2 rounded border">Negotiate Sponsor (quick)</button>
+                <button onClick={adjustTicketPrice} className="px-3 py-2 rounded border">Adjust ticket price</button>
               </div>
             </div>
 
             <div className="mt-4">
-              <h4 className="font-medium">Multijoueur local / Ligues</h4>
-              <div className="text-sm text-slate-600 mt-2">La ligue est jouée localement. Pour vrai multijoueur il faut un backend (auth + gestion de parties). Ici, chaque club représente un manager (peut être joué manuellement).</div>
+              <h4 className="font-medium">Local multiplayer / leagues</h4>
+              <div className="text-sm text-slate-600 mt-2">The league runs locally. A real multiplayer mode would need a backend (auth + match management). For now each club represents a manager you can control manually.</div>
             </div>
           </div>
         </aside>
       </div>
 
-      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Prototype — plein écran match feed (Sofascore-like). Clique "Jouer le match" pour lancer un match minute-by-minute.</footer>
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Release version: {APP_VERSION}</footer>
 
       {/* Fullscreen Match Overlay (Sofascore-like) */}
       {matchOverlay ? (
         <div className="fixed inset-0 z-50 bg-black bg-opacity-80 flex flex-col text-white">
           <div className="p-4 flex items-center justify-between border-b border-white/10">
-            <div className="flex items-center gap-4">
-              <div className="text-lg font-bold">{matchOverlay.home.name}</div>
-              <div className="text-3xl font-extrabold">{matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.home.name && e.minute <= matchOverlay.pointerMinute).length} - {matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.away.name && e.minute <= matchOverlay.pointerMinute).length}</div>
-              <div className="text-lg font-bold">{matchOverlay.away.name}</div>
+            <div>
+              <div className="flex items-center gap-6">
+                <div className="text-left">
+                  <div className="text-xs text-white/50 uppercase">Home</div>
+                  <div className="text-lg font-bold">{matchOverlay.home.name}</div>
+                  <div className="text-xs text-white/60">Mentality: {matchOverlay.stream.mentalities ? matchOverlay.stream.mentalities.home : 'Balanced'}</div>
+                </div>
+                <div className="text-3xl font-extrabold">
+                  {liveStats ? liveStats.home.goals : 0} - {liveStats ? liveStats.away.goals : 0}
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-white/50 uppercase">Away</div>
+                  <div className="text-lg font-bold">{matchOverlay.away.name}</div>
+                  <div className="text-xs text-white/60">Mentality: {matchOverlay.stream.mentalities ? matchOverlay.stream.mentalities.away : 'Balanced'}</div>
+                </div>
+              </div>
+              <div className="text-xs text-white/60 mt-2">Live xG: {liveStats ? liveStats.home.xg.toFixed(2) : '0.00'} - {liveStats ? liveStats.away.xg.toFixed(2) : '0.00'}</div>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-sm">{matchOverlay.pointerMinute > 0 ? `${matchOverlay.pointerMinute}’` : `0’`}</div>
-              <button onClick={()=>{ finishMatchNow(); }} className="px-3 py-1 rounded border bg-white/10">Terminer</button>
-              <button onClick={()=>{ closeOverlay(); }} className="px-3 py-1 rounded border bg-white/5">Quitter</button>
+              <button onClick={()=>{ finishMatchNow(); }} className="px-3 py-1 rounded border bg-white/10">Finish</button>
+              <button onClick={()=>{ closeOverlay(); }} className="px-3 py-1 rounded border bg-white/5">Exit</button>
             </div>
           </div>
 
@@ -439,33 +858,69 @@ export default function FootballManagerLite() {
           <div className="flex-1 flex flex-col md:flex-row gap-4 p-4">
             <div className="flex-1 overflow-hidden">
               <div ref={feedRef} className="h-full overflow-auto bg-black/30 rounded p-3">
-                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Le match commence…</div> : matchOverlay.displayedEvents.map((e,i)=> (
-                  <div key={i} className="mb-3 p-2 bg-white/5 rounded">
-                    <div className="text-xs text-white/60">{e.minute}’</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <div className="text-sm font-medium">{e.type==='goal' ? '⚽' : e.type==='card' ? '🟨' : e.type==='injury' ? '🤕' : '•'}</div>
-                      <div className="text-sm">{e.text}</div>
+                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Match is starting…</div> : matchOverlay.displayedEvents.map((e,i)=> {
+                  const icon = e.kind==='goal' ? '⚽' : e.kind==='yellow-card' ? '🟨' : e.kind==='injury' ? '🤕' : e.onTarget ? '🎯' : '•';
+                  return (
+                    <div key={`${e.sequence || i}-${e.minute}-${e.team}`} className="mb-3 p-2 bg-white/5 rounded">
+                      <div className="flex items-center justify-between text-xs text-white/60">
+                        <span>{e.minute}’</span>
+                        <span>{e.team}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="text-sm font-medium">{icon}</div>
+                        <div className="text-sm">{e.text}</div>
+                      </div>
+                      {typeof e.xg === 'number' && (e.kind==='goal' || e.kind==='shot') ? (
+                        <div className="text-xs text-white/50 mt-1">xG: {e.xg.toFixed(2)}</div>
+                      ) : null}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
-            <div className="w-full md:w-80">
+            <div className="w-full md:w-80 space-y-3">
               <div className="bg-white/5 rounded p-3">
-                <div className="text-sm mb-2">Contrôles</div>
+                <div className="text-sm mb-2">Controls</div>
                 <div className="flex gap-2 mb-3">
-                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶️ Reprendre'}</button>
+                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶ Resume'}</button>
                   <button onClick={()=>setSpeed(1)} className={`px-3 py-1 rounded border ${matchOverlay.speed===1? 'bg-emerald-500':''}`}>x1</button>
                   <button onClick={()=>setSpeed(2)} className={`px-3 py-1 rounded border ${matchOverlay.speed===2? 'bg-emerald-500':''}`}>x2</button>
                   <button onClick={()=>setSpeed(4)} className={`px-3 py-1 rounded border ${matchOverlay.speed===4? 'bg-emerald-500':''}`}>x4</button>
                 </div>
-                <div className="text-sm mb-2">Résumé</div>
-                <div className="text-xs text-white/70">Score prévu: {matchOverlay.stream.score}</div>
-                <div className="mt-2 text-xs">Événements totaux: {matchOverlay.stream.events.length}</div>
+                <div className="text-xs text-white/70">Sim speed adjusts how quickly in-game minutes elapse.</div>
                 <div className="mt-3">
-                  <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Passer à la fin</button>
+                  <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Skip to end</button>
                 </div>
+              </div>
+
+              <div className="bg-white/5 rounded p-3">
+                <div className="text-sm mb-2">Live stats</div>
+                {liveStats ? (
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <div className="flex justify-between text-xs text-white/70">
+                        <span>{matchOverlay.home.name}</span>
+                        <span>{matchOverlay.away.name}</span>
+                      </div>
+                      <div className="h-2 bg-white/10 rounded overflow-hidden mt-1">
+                        <div style={{ width: `${liveStats.home.possession}%` }} className="h-2 bg-emerald-400"></div>
+                      </div>
+                      <div className="flex justify-between text-xs text-white/60 mt-1">
+                        <span>{liveStats.home.possession}%</span>
+                        <span>{liveStats.away.possession}%</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex justify-between"><span>Shots</span><span>{liveStats.home.shots} - {liveStats.away.shots}</span></div>
+                      <div className="flex justify-between"><span>On target</span><span>{liveStats.home.shotsOnTarget} - {liveStats.away.shotsOnTarget}</span></div>
+                      <div className="flex justify-between"><span>Expected goals</span><span>{liveStats.home.xg.toFixed(2)} - {liveStats.away.xg.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Yellow cards</span><span>{liveStats.home.yellowCards} - {liveStats.away.yellowCards}</span></div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-white/60">Stats will populate as the match begins.</div>
+                )}
               </div>
             </div>
           </div>
@@ -474,11 +929,14 @@ export default function FootballManagerLite() {
           {(!matchOverlay.playing && matchOverlay.pointerMinute>=90) ? (
             <div className="p-4 border-t border-white/10 flex items-center justify-between">
               <div>
-                <div className="text-lg font-bold">FIN DU MATCH</div>
-                <div className="text-sm">Score final: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
+                <div className="text-lg font-bold">FULL TIME</div>
+                <div className="text-sm">Final score: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
+                {liveStats ? (
+                  <div className="text-xs text-white/60 mt-1">xG {liveStats.home.xg.toFixed(2)} - {liveStats.away.xg.toFixed(2)} • Shots {liveStats.home.shots} - {liveStats.away.shots}</div>
+                ) : null}
               </div>
               <div>
-                <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Retour à la saison</button>
+                <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Back to season</button>
               </div>
             </div>
           ) : null}
@@ -487,3 +945,5 @@ export default function FootballManagerLite() {
     </div>
   );
 }
+
+window.FootballManagerLite = FootballManagerLite;
