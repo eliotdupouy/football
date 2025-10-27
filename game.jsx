@@ -1,6 +1,6 @@
 const { useEffect, useMemo, useRef, useState } = React;
 
-const APP_VERSION = 'v1.5.0';
+const APP_VERSION = 'v2.0.0';
 const DATA_VERSION = (window.LIGUE1_DATA && window.LIGUE1_DATA.version) || 'legacy';
 
 const MENTALITY_PROFILES = {
@@ -234,6 +234,76 @@ function computeTeamStrength(players) {
   return sum / players.length;
 }
 
+function createPlayerStatsEntry(player, club) {
+  return {
+    playerId: player.id,
+    name: player.name,
+    pos: player.pos,
+    clubId: club ? club.id : null,
+    clubName: club ? club.name : 'Free Agent',
+    overall: player.rating,
+    appearances: 0,
+    minutes: 0,
+    goals: 0,
+    assists: 0,
+    shots: 0,
+    shotsOnTarget: 0,
+    xg: 0,
+    yellowCards: 0,
+    ratingSum: 0,
+    ratingCount: 0,
+    avgMatchRating: 0,
+    lastMatchRating: null,
+    lastUpdated: null,
+  };
+}
+
+function ensureStatsForRoster(stats, clubs) {
+  if (!Array.isArray(clubs) || !clubs.length) return stats;
+  let mutated = false;
+  const next = { ...stats };
+  clubs.forEach((club) => {
+    club.players.forEach((player) => {
+      const existing = next[player.id];
+      if (!existing) {
+        next[player.id] = createPlayerStatsEntry(player, club);
+        mutated = true;
+      } else {
+        let updated = existing;
+        if (
+          existing.name !== player.name ||
+          existing.pos !== player.pos ||
+          existing.clubId !== club.id ||
+          existing.clubName !== club.name ||
+          existing.overall !== player.rating
+        ) {
+          updated = {
+            ...existing,
+            name: player.name,
+            pos: player.pos,
+            clubId: club.id,
+            clubName: club.name,
+            overall: player.rating,
+          };
+          mutated = true;
+        }
+        next[player.id] = updated;
+      }
+    });
+  });
+  return mutated ? next : stats;
+}
+
+function buildInitialPlayerStats(clubs) {
+  const base = {};
+  clubs.forEach((club) => {
+    club.players.forEach((player) => {
+      base[player.id] = createPlayerStatsEntry(player, club);
+    });
+  });
+  return base;
+}
+
 function selectStartingXI(club) {
   return clone(club.players)
     .sort((a, b) => b.rating - a.rating)
@@ -419,11 +489,16 @@ function prepareMatchEventStream(home, away, context = {}) {
     const opponent = isHome ? away : home;
     const profile = isHome ? homeProfile : awayProfile;
     const shooter = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+    const assisterPool = lineup.filter((p) => p.id !== shooter.id);
     const onTargetProbability = clamp(onTargetChance + profile.attack * 0.04, 0.18, 0.82);
     const chanceOnTarget = Math.random() < onTargetProbability;
     const goalProbability = clamp(goalChance + profile.attack * 0.03 - (isHome ? awayProfile.defense : homeProfile.defense) * 0.025, 0.05, 0.65);
     const xg = clamp(goalProbability + Math.random() * 0.08, 0.03, 0.85);
     const isGoal = chanceOnTarget && Math.random() < goalProbability;
+
+    const assister = isGoal && assisterPool.length
+      ? assisterPool[randInt(0, assisterPool.length - 1)]
+      : null;
 
     if (isGoal) {
       if (isHome) homeGoals += 1; else awayGoals += 1;
@@ -443,6 +518,9 @@ function prepareMatchEventStream(home, away, context = {}) {
       onTarget: chanceOnTarget || isGoal,
       xg,
       player: shooter.name,
+      playerId: shooter.id,
+      assistId: assister ? assister.id : null,
+      assistName: assister ? assister.name : null,
       text: outcomeText,
       scoreboard: { homeGoals, awayGoals },
       sequence: sequenceCounter += 1,
@@ -481,6 +559,8 @@ function prepareMatchEventStream(home, away, context = {}) {
         team: team.name,
         kind: 'yellow-card',
         text: `Yellow card for ${player.name} (${team.name}).`,
+        playerId: player.id,
+        player: player.name,
         sequence: sequenceCounter += 1,
       });
     }
@@ -576,17 +656,41 @@ function FootballManagerLite() {
     return createInitialMarket(DEFAULT_CLUBS);
   });
 
+  const [playerStats, setPlayerStats] = useState(() => {
+    const storedVersion = localStorage.getItem('fm_data_version');
+    const raw = localStorage.getItem('fm_playerStats');
+    if (raw && storedVersion === DATA_VERSION) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return ensureStatsForRoster(parsed, DEFAULT_CLUBS);
+        }
+      } catch (err) {
+        console.warn('Failed to parse stored player stats, regenerating', err);
+      }
+    }
+    return buildInitialPlayerStats(DEFAULT_CLUBS);
+  });
+
   const [log, setLog] = useState(()=>{ const raw = localStorage.getItem('fm_log'); return raw?JSON.parse(raw):[]; });
   const [mentality, setMentality] = useState(()=> localStorage.getItem('fm_mentality') || 'Balanced');
   const [currentRound, setCurrentRound] = useState(()=>{ const raw = localStorage.getItem('fm_currentRound'); return raw?Number(raw):1; });
+  const [activeView, setActiveView] = useState(()=> localStorage.getItem('fm_view') || 'dashboard');
+  const [playerStatsFilters, setPlayerStatsFilters] = useState({ club: 'all', position: 'all', search: '', sort: 'rating' });
 
   useEffect(()=>{ localStorage.setItem('fm_clubs', JSON.stringify(clubs)); }, [clubs]);
   useEffect(()=>{ localStorage.setItem('fm_data_version', DATA_VERSION); }, [clubs]);
   useEffect(()=>{ localStorage.setItem('fm_fixtures_full', JSON.stringify(fixtures)); }, [fixtures]);
   useEffect(()=>{ localStorage.setItem('fm_market', JSON.stringify(market)); }, [market]);
+  useEffect(()=>{ localStorage.setItem('fm_playerStats', JSON.stringify(playerStats)); }, [playerStats]);
   useEffect(()=>{ localStorage.setItem('fm_log', JSON.stringify(log)); }, [log]);
   useEffect(()=>{ localStorage.setItem('fm_mentality', mentality); }, [mentality]);
   useEffect(()=>{ localStorage.setItem('fm_currentRound', String(currentRound)); }, [currentRound]);
+  useEffect(()=>{ localStorage.setItem('fm_view', activeView); }, [activeView]);
+
+  useEffect(()=>{
+    setPlayerStats((stats) => ensureStatsForRoster(stats, clubs));
+  }, [clubs]);
 
   // --- Sofascore fullscreen state ---
   const [matchOverlay, setMatchOverlay] = useState(null);
@@ -604,20 +708,108 @@ function FootballManagerLite() {
     } : c));
   }
 
+  function findPlayerRecord(playerId) {
+    for (const club of clubs) {
+      const candidate = club.players.find((p) => p.id === playerId);
+      if (candidate) {
+        return { club, player: candidate };
+      }
+    }
+    return null;
+  }
+
+  function discussContract(playerId) {
+    const info = findPlayerRecord(playerId);
+    if (!info) {
+      pushLog('Contract meeting failed: player not found.');
+      return;
+    }
+    pushLog(`Negotiations opened with ${info.player.name} regarding updated contract terms.`);
+  }
+
+  function praisePlayer(playerId) {
+    const info = findPlayerRecord(playerId);
+    if (!info || info.club.id !== playerClub.id) {
+      pushLog('You can only praise members of your squad.');
+      return;
+    }
+    changePlayerLocalRating(playerId, 1);
+    pushLog(`${info.player.name} appreciated the public praise for recent form.`);
+  }
+
+  function enquireTransfer(playerId) {
+    const info = findPlayerRecord(playerId);
+    if (!info) {
+      pushLog('Enquiry failed: player unavailable.');
+      return;
+    }
+    if (info.club.id === playerClub.id) {
+      pushLog(`${info.player.name} already plays for you.`);
+      return;
+    }
+    pushLog(`Sent enquiry to ${info.club.name} for ${info.player.name}.`);
+  }
+
+  function shortlistPlayer(playerId) {
+    const info = findPlayerRecord(playerId);
+    if (!info) {
+      pushLog('Shortlist update failed: player missing.');
+      return;
+    }
+    pushLog(`${info.player.name} added to scouting shortlist.`);
+  }
+
+  function transferListFromStats(playerId) {
+    const info = findPlayerRecord(playerId);
+    if (!info || info.club.id !== playerClub.id) {
+      pushLog('Only your players can be transfer listed from this screen.');
+      return;
+    }
+    listPlayerForSale(playerId, Math.round((info.player.rating || 60) * 900));
+  }
+
   function signPlayerFromMarket(itemId) {
     const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transfer failed: insufficient funds to buy ${item.player.name} (€${price})`); return; }
     setClubs(cs=> cs.map(c=> c.id===0 ? {
       ...c,
-      players:[...c.players, { ...item.player, id: Date.now(), attributes: item.player.attributes ? { ...item.player.attributes } : undefined }],
+      players:[...c.players, { ...item.player, attributes: item.player.attributes ? { ...item.player.attributes } : undefined }],
       balance: c.balance - price
     } : c));
     setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfer: ${item.player.name} bought for €${price}`);
+    setPlayerStats((stats) => {
+      const existing = stats[item.player.id];
+      const baseEntry = existing || createPlayerStatsEntry(item.player, playerClub);
+      return {
+        ...stats,
+        [item.player.id]: {
+          ...baseEntry,
+          playerId: item.player.id,
+          name: item.player.name,
+          pos: item.player.pos,
+          clubId: playerClub.id,
+          clubName: playerClub.name,
+          overall: item.player.rating,
+        },
+      };
+    });
   }
 
   function listPlayerForSale(playerId, price) {
     const p = playerClub.players.find(pp=>pp.id===playerId); if(!p) return; const id = `${playerClub.name}-${playerId}-${Date.now()}`;
     setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p, attributes: p.attributes ? { ...p.attributes } : undefined}, price }, ...m]);
     setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} listed for sale for €${price}`);
+    setPlayerStats((stats) => {
+      const existing = stats[playerId];
+      if (!existing) return stats;
+      return {
+        ...stats,
+        [playerId]: {
+          ...existing,
+          clubId: null,
+          clubName: 'Transfer List',
+        },
+      };
+    });
   }
 
   // find next fixture in current round (first non-played)
@@ -666,14 +858,141 @@ function FootballManagerLite() {
       if (nextMinute >= 90) {
         // finalize: mark fixture played and update clubs (income & ratings)
         const stats = computeMatchStatsForMinute(mo.stream.events, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
-        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events, stats });
+        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events, stats }, mo.context);
         return { ...mo, pointerMinute: 90, displayedEvents: displayed, playing: false };
       }
       return { ...mo, pointerMinute: nextMinute, displayedEvents: displayed };
     });
   }
 
-  function finalizeMatch(fixtureId, homeClub, awayClub, result) {
+  function recordMatchToPlayerStats(homeClub, awayClub, context, result) {
+    if (!result || !result.events) return;
+    const homeLineup = context?.homeLineup || selectStartingXI(homeClub);
+    const awayLineup = context?.awayLineup || selectStartingXI(awayClub);
+    const contributions = {};
+
+    function ensureContribution(id) {
+      if (!id) return null;
+      if (!contributions[id]) {
+        contributions[id] = {
+          goals: 0,
+          assists: 0,
+          shots: 0,
+          shotsOnTarget: 0,
+          xg: 0,
+          yellowCards: 0,
+        };
+      }
+      return contributions[id];
+    }
+
+    result.events.forEach((event) => {
+      if ((event.kind === 'goal' || event.kind === 'shot') && event.playerId) {
+        const slot = ensureContribution(event.playerId);
+        if (slot) {
+          slot.shots += 1;
+          if (event.onTarget) slot.shotsOnTarget += 1;
+          if (typeof event.xg === 'number') slot.xg += event.xg;
+          if (event.kind === 'goal') slot.goals += 1;
+        }
+      }
+      if (event.kind === 'goal' && event.assistId) {
+        const assistSlot = ensureContribution(event.assistId);
+        if (assistSlot) {
+          assistSlot.assists += 1;
+        }
+      }
+      if (event.kind === 'yellow-card' && event.playerId) {
+        const cardSlot = ensureContribution(event.playerId);
+        if (cardSlot) {
+          cardSlot.yellowCards += 1;
+        }
+      }
+    });
+
+    const ratingFor = (stats) => {
+      const base = 6;
+      const rating = base
+        + stats.goals * 0.9
+        + stats.assists * 0.55
+        + stats.shotsOnTarget * 0.12
+        + stats.xg * 0.3
+        - stats.yellowCards * 0.25;
+      return Number(clamp(rating, 4.5, 10).toFixed(2));
+    };
+
+    const lineupPackages = [
+      { club: homeClub, lineup: homeLineup },
+      { club: awayClub, lineup: awayLineup },
+    ];
+
+    setPlayerStats((prev) => {
+      let next = { ...prev };
+      let mutated = false;
+
+      lineupPackages.forEach(({ club, lineup }) => {
+        lineup.forEach((player) => {
+          const stats = contributions[player.id] || {
+            goals: 0,
+            assists: 0,
+            shots: 0,
+            shotsOnTarget: 0,
+            xg: 0,
+            yellowCards: 0,
+          };
+          const matchRating = ratingFor(stats);
+          const existing = next[player.id] || createPlayerStatsEntry(player, club);
+          const updated = {
+            ...existing,
+            playerId: player.id,
+            name: player.name,
+            pos: player.pos,
+            clubId: club.id,
+            clubName: club.name,
+            overall: player.rating,
+            appearances: existing.appearances + 1,
+            minutes: existing.minutes + 90,
+            goals: existing.goals + stats.goals,
+            assists: existing.assists + stats.assists,
+            shots: existing.shots + stats.shots,
+            shotsOnTarget: existing.shotsOnTarget + stats.shotsOnTarget,
+            xg: Number((existing.xg + stats.xg).toFixed(2)),
+            yellowCards: existing.yellowCards + stats.yellowCards,
+            ratingSum: existing.ratingSum + matchRating,
+            ratingCount: existing.ratingCount + 1,
+            avgMatchRating: Number(((existing.ratingSum + matchRating) / (existing.ratingCount + 1)).toFixed(2)),
+            lastMatchRating: matchRating,
+            lastUpdated: Date.now(),
+          };
+          if (
+            existing.appearances !== updated.appearances ||
+            existing.minutes !== updated.minutes ||
+            existing.goals !== updated.goals ||
+            existing.assists !== updated.assists ||
+            existing.shots !== updated.shots ||
+            existing.shotsOnTarget !== updated.shotsOnTarget ||
+            existing.xg !== updated.xg ||
+            existing.yellowCards !== updated.yellowCards ||
+            existing.ratingSum !== updated.ratingSum ||
+            existing.ratingCount !== updated.ratingCount ||
+            existing.avgMatchRating !== updated.avgMatchRating ||
+            existing.lastMatchRating !== updated.lastMatchRating ||
+            existing.clubId !== updated.clubId ||
+            existing.overall !== updated.overall ||
+            existing.name !== updated.name ||
+            existing.pos !== updated.pos
+          ) {
+            mutated = true;
+            next[player.id] = updated;
+          }
+        });
+      });
+
+      return mutated ? next : prev;
+    });
+  }
+
+  function finalizeMatch(fixtureId, homeClub, awayClub, result, context) {
     const enrichedResult = { ...result, score: `${result.homeGoals}-${result.awayGoals}` };
     // update fixtures
     setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result: enrichedResult } : f));
@@ -701,6 +1020,7 @@ function FootballManagerLite() {
       }
       return c;
     }));
+    recordMatchToPlayerStats(homeClub, awayClub, context, enrichedResult);
     pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (gate: €${ticketIncome})`);
   }
 
@@ -735,7 +1055,7 @@ function FootballManagerLite() {
       const homeGoals = all.filter(e=>e.kind==='goal' && e.team===mo.home.name).length;
       const awayGoals = all.filter(e=>e.kind==='goal' && e.team===mo.away.name).length;
       const stats = computeMatchStatsForMinute(all, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
-      finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all, stats });
+      finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all, stats }, mo.context);
       const merged = new Map();
       [...mo.displayedEvents, ...all].forEach(ev=>{
         const key = `${ev.minute}-${ev.sequence || ev.player || ev.text}-${ev.team}`;
@@ -765,6 +1085,7 @@ function FootballManagerLite() {
     setCurrentRound(1);
     setMatchOverlay(null);
     setLog([]);
+    setPlayerStats(buildInitialPlayerStats(refreshedClubs));
     pushLog('Season reset to the official Ligue 1 dataset.');
   }
 
@@ -843,208 +1164,407 @@ function FootballManagerLite() {
     matchOverlay.away.name,
   ) : null;
 
+  const playerStatsList = useMemo(() => {
+    const list = Object.values(playerStats || {}).map((entry) => {
+      const club = clubs.find((c) => c.id === entry.clubId);
+      const clubName = club ? club.name : entry.clubName;
+      const minutes = entry.minutes || 0;
+      const goalsPer90 = minutes ? (entry.goals / minutes) * 90 : 0;
+      const xgPer90 = minutes ? (entry.xg / minutes) * 90 : 0;
+      const shotsPer90 = minutes ? (entry.shots / minutes) * 90 : 0;
+      return {
+        ...entry,
+        clubName,
+        goalsPer90,
+        shotsPer90,
+        xgPer90,
+        minutesPerAppearance: entry.appearances ? Math.round(entry.minutes / entry.appearances) : 0,
+      };
+    });
+
+    const { club, position, search, sort } = playerStatsFilters;
+    const searchTerm = search.trim().toLowerCase();
+    const filtered = list.filter((item) => {
+      if (club !== 'all' && String(item.clubId) !== String(club) && item.clubName !== club) return false;
+      if (position !== 'all' && item.pos !== position) return false;
+      if (searchTerm && !item.name.toLowerCase().includes(searchTerm)) return false;
+      return true;
+    });
+
+    const sorters = {
+      rating: (a, b) => (b.avgMatchRating || 0) - (a.avgMatchRating || 0),
+      goals: (a, b) => (b.goals || 0) - (a.goals || 0),
+      assists: (a, b) => (b.assists || 0) - (a.assists || 0),
+      xg: (a, b) => (b.xg || 0) - (a.xg || 0),
+      minutes: (a, b) => (b.minutes || 0) - (a.minutes || 0),
+    };
+
+    const sorter = sorters[sort] || sorters.rating;
+    return filtered.sort((a, b) => {
+      const primary = sorter(a, b);
+      if (primary !== 0) return primary;
+      return (b.overall || 0) - (a.overall || 0);
+    });
+  }, [playerStats, clubs, playerStatsFilters]);
+
+  const navTabs = useMemo(() => ([
+    { id: 'dashboard', label: 'Season Hub' },
+    { id: 'playerStats', label: 'Player Stats' },
+  ]), []);
+
+  const clubFilterOptions = useMemo(() => (
+    [{ value: 'all', label: 'All clubs' }, ...clubs.map((club) => ({ value: String(club.id), label: club.name }))]
+  ), [clubs]);
+
+  const positionOptions = useMemo(() => {
+    const set = new Set();
+    Object.values(playerStats || {}).forEach((entry) => {
+      if (entry?.pos) set.add(entry.pos);
+    });
+    return ['all', ...Array.from(set).sort()];
+  }, [playerStats]);
+
   // render
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white p-6 font-sans">
       <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6">
         <main className="lg:col-span-3">
           <div className="bg-white rounded-2xl shadow p-4">
-            <header className="flex items-center justify-between mb-4">
+            <header className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between mb-4">
               <div>
                 <h1 className="text-2xl font-bold">{playerClub.name} — Football Manager Lite</h1>
                 <div className="text-sm text-slate-600">Balance: €{Math.round(playerClub.balance).toLocaleString()} — Sponsor: {playerClub.sponsor.name} (€{playerClub.sponsor.monthly}/month)</div>
               </div>
-              <div className="space-x-2">
-                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Training: ${playerClub.players[idx].name} improves form.`); }} className="px-3 py-1 rounded-lg border">Training</button>
-                <button onClick={resetSeason} className="px-3 py-1 rounded-lg border text-red-600">Reset Season</button>
+              <div className="flex flex-col gap-3 items-start md:items-end">
+                <div className="flex flex-wrap gap-2">
+                  {navTabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveView(tab.id)}
+                      className={`px-4 py-1.5 rounded-full border text-sm ${activeView === tab.id ? 'bg-emerald-500 text-white border-transparent shadow-sm' : 'bg-white'}`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Training: ${playerClub.players[idx].name} improves form.`); }} className="px-3 py-1 rounded-lg border">Training</button>
+                  <button onClick={resetSeason} className="px-3 py-1 rounded-lg border text-red-600">Reset Season</button>
+                </div>
               </div>
             </header>
 
-            {/* Squad + Transfers */}
-            <section className="mb-4">
-              <h2 className="font-semibold mb-2">Squad</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {playerClub.players.map(p=> (
-                      <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
-                        <div>
-                          <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
-                          <div className="text-sm text-slate-600">OVR {p.rating} — Age {p.age}</div>
-                          <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(p.attributes)}</div>
-                        </div>
-                        <div className="flex gap-1">
-                          <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
-                          <button onClick={()=>changePlayerLocalRating(p.id,1)} className="px-2 py-1 rounded border">+</button>
-                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Sell</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <h3 className="font-medium">Transfer Market</h3>
-                  <div className="max-h-64 overflow-auto mt-2 border rounded p-2 bg-slate-50">
-                    {market.length===0 ? <div className="text-sm text-slate-500">No players for sale right now.</div> : market.map(m=> (
-                      <div key={m.id} className="p-2 rounded border bg-white mb-2">
-                        <div className="flex justify-between items-center">
-                          <div>
-                            <div className="font-medium">{m.player.name} — {m.player.pos}</div>
-                            <div className="text-sm text-slate-600">From: {m.fromClub} — OVR {m.player.rating}</div>
-                            <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(m.player.attributes)}</div>
+            {activeView === 'dashboard' ? (
+              <>
+                {/* Squad + Transfers */}
+                <section className="mb-4">
+                  <h2 className="font-semibold mb-2">Squad</h2>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {playerClub.players.map(p=> (
+                          <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
+                            <div>
+                              <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
+                              <div className="text-sm text-slate-600">OVR {p.rating} — Age {p.age}</div>
+                              <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(p.attributes)}</div>
+                            </div>
+                            <div className="flex gap-1">
+                              <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
+                              <button onClick={()=>changePlayerLocalRating(p.id,1)} className="px-2 py-1 rounded border">+</button>
+                              <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Sell</button>
+                            </div>
                           </div>
-                          <div className="text-right">
-                            <div className="font-medium">{m.price}€</div>
-                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Buy</button>
-                          </div>
-                        </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {/* Fixtures & Play Match */}
-            <section className="mb-4">
-              <h2 className="font-semibold mb-2">Season Schedule</h2>
-              <div className="flex gap-2 items-center mb-3">
-                <div>Current round: {currentRound}</div>
-                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Play Match</button>
-              </div>
-
-              <div className="max-h-48 overflow-auto border rounded p-2 bg-slate-50">
-                {fixtures.filter(f=> f.round>=currentRound && f.round< currentRound+3).map(f=> (
-                  <div key={f.id} className="p-2 rounded border bg-white mb-2">
-                    <div className="text-sm">R{f.round} — {f.home} vs {f.away} {f.played ? ` — ${f.result.score}` : ''}</div>
-                    {f.played ? <div className="text-xs text-slate-600">Match already played</div> : null}
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            {matchPreview ? (
-              <section className="mb-4">
-                <h2 className="font-semibold mb-2">Match Preview</h2>
-                <div className="border rounded-lg bg-slate-50 p-3">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div className="bg-white rounded-lg border p-3">
-                      <div className="text-sm text-slate-500 mb-1">Home</div>
-                      <div className="text-lg font-semibold">{matchPreview.home.club.name}</div>
-                      <div className="text-sm text-slate-600">League rank: {matchPreview.home.rank || '—'}</div>
-                      <div className="text-sm text-slate-600">XI rating: {matchPreview.home.avgRating}</div>
-                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.home.form)}</div>
-                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.home.club.id === playerClub.id ? mentality : matchPreview.home.mentality}</div>
                     </div>
-                    <div className="bg-white rounded-lg border p-3">
-                      <div className="text-sm font-semibold mb-2">Odds & Strategy</div>
-                      <div className="space-y-1 text-sm">
-                        <div className="flex justify-between"><span>Home</span><span>{matchPreview.odds.homeOdds}</span></div>
-                        <div className="flex justify-between"><span>Draw</span><span>{matchPreview.odds.drawOdds}</span></div>
-                        <div className="flex justify-between"><span>Away</span><span>{matchPreview.odds.awayOdds}</span></div>
+
+                    <div>
+                      <h3 className="font-medium">Transfer Market</h3>
+                      <div className="max-h-64 overflow-auto mt-2 border rounded p-2 bg-slate-50">
+                        {market.length===0 ? <div className="text-sm text-slate-500">No players for sale right now.</div> : market.map(m=> (
+                          <div key={m.id} className="p-2 rounded border bg-white mb-2">
+                            <div className="flex justify-between items-center">
+                              <div>
+                                <div className="font-medium">{m.player.name} — {m.player.pos}</div>
+                                <div className="text-sm text-slate-600">From: {m.fromClub} — OVR {m.player.rating}</div>
+                                <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(m.player.attributes)}</div>
+                              </div>
+                              <div className="text-right">
+                                <div className="font-medium">{m.price}€</div>
+                                <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Buy</button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                      {matchPreview.playerSide ? (
-                        <div className="mt-3">
-                          <div className="text-xs text-slate-500">Adjust team mentality</div>
-                          <div className="flex gap-2 mt-2">
-                            {['Defensive','Balanced','Attacking'].map(option => (
-                              <button
-                                key={option}
-                                onClick={()=> setMentality(option)}
-                                className={`px-3 py-1 rounded border ${mentality===option ? 'bg-emerald-500 text-white border-transparent' : ''}`}
-                              >
-                                {option}
-                              </button>
+                    </div>
+                  </div>
+                </section>
+
+                {/* Fixtures & Play Match */}
+                <section className="mb-4">
+                  <h2 className="font-semibold mb-2">Season Schedule</h2>
+                  <div className="flex gap-2 items-center mb-3">
+                    <div>Current round: {currentRound}</div>
+                    <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Play Match</button>
+                  </div>
+
+                  <div className="max-h-48 overflow-auto border rounded p-2 bg-slate-50">
+                    {fixtures.filter(f=> f.round>=currentRound && f.round< currentRound+3).map(f=> (
+                      <div key={f.id} className="p-2 rounded border bg-white mb-2">
+                        <div className="text-sm">R{f.round} — {f.home} vs {f.away} {f.played ? ` — ${f.result.score}` : ''}</div>
+                        {f.played ? <div className="text-xs text-slate-600">Match already played</div> : null}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                {matchPreview ? (
+                  <section className="mb-4">
+                    <h2 className="font-semibold mb-2">Match Preview</h2>
+                    <div className="border rounded-lg bg-slate-50 p-3">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div className="bg-white rounded-lg border p-3">
+                          <div className="text-sm text-slate-500 mb-1">Home</div>
+                          <div className="text-lg font-semibold">{matchPreview.home.club.name}</div>
+                          <div className="text-sm text-slate-600">League rank: {matchPreview.home.rank || '—'}</div>
+                          <div className="text-sm text-slate-600">XI rating: {matchPreview.home.avgRating}</div>
+                          <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.home.form)}</div>
+                          <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.home.club.id === playerClub.id ? mentality : matchPreview.home.mentality}</div>
+                        </div>
+                        <div className="bg-white rounded-lg border p-3">
+                          <div className="text-sm font-semibold mb-2">Odds & Strategy</div>
+                          <div className="space-y-1 text-sm">
+                            <div className="flex justify-between"><span>Home</span><span>{matchPreview.odds.homeOdds}</span></div>
+                            <div className="flex justify-between"><span>Draw</span><span>{matchPreview.odds.drawOdds}</span></div>
+                            <div className="flex justify-between"><span>Away</span><span>{matchPreview.odds.awayOdds}</span></div>
+                          </div>
+                          {matchPreview.playerSide ? (
+                            <div className="mt-3">
+                              <div className="text-xs text-slate-500">Adjust team mentality</div>
+                              <div className="flex gap-2 mt-2">
+                                {['Defensive','Balanced','Attacking'].map(option => (
+                                  <button
+                                    key={option}
+                                    onClick={()=> setMentality(option)}
+                                    className={`px-3 py-1 rounded border ${mentality===option ? 'bg-emerald-500 text-white border-transparent' : ''}`}
+                                  >
+                                    {option}
+                                  </button>
+                                ))}
+                              </div>
+                              <div className="text-xs text-slate-500 mt-2">Risk profile shifts chance of scoring or conceding.</div>
+                            </div>
+                          ) : (
+                            <div className="text-xs text-slate-500 mt-3">You are observing this match as a neutral manager.</div>
+                          )}
+                        </div>
+                        <div className="bg-white rounded-lg border p-3">
+                          <div className="text-sm text-slate-500 mb-1">Away</div>
+                          <div className="text-lg font-semibold">{matchPreview.away.club.name}</div>
+                          <div className="text-sm text-slate-600">League rank: {matchPreview.away.rank || '—'}</div>
+                          <div className="text-sm text-slate-600">XI rating: {matchPreview.away.avgRating}</div>
+                          <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.away.form)}</div>
+                          <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.away.club.id === playerClub.id ? mentality : matchPreview.away.mentality}</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                        <div className="bg-white rounded-lg border p-3">
+                          <div className="text-sm font-semibold mb-2">{matchPreview.home.club.name} XI</div>
+                          <div className="space-y-1 text-xs text-slate-600">
+                            {matchPreview.home.lineup.map(player => (
+                              <div key={player.id} className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div>{player.name} ({player.pos})</div>
+                                  <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
+                                </div>
+                                <div className="font-medium">{player.rating}</div>
+                              </div>
                             ))}
                           </div>
-                          <div className="text-xs text-slate-500 mt-2">Risk profile shifts chance of scoring or conceding.</div>
                         </div>
-                      ) : (
-                        <div className="text-xs text-slate-500 mt-3">You are observing this match as a neutral manager.</div>
-                      )}
+                        <div className="bg-white rounded-lg border p-3">
+                          <div className="text-sm font-semibold mb-2">{matchPreview.away.club.name} XI</div>
+                          <div className="space-y-1 text-xs text-slate-600">
+                            {matchPreview.away.lineup.map(player => (
+                              <div key={player.id} className="flex items-start justify-between gap-2">
+                                <div>
+                                  <div>{player.name} ({player.pos})</div>
+                                  <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
+                                </div>
+                                <div className="font-medium">{player.rating}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <div className="bg-white rounded-lg border p-3">
-                      <div className="text-sm text-slate-500 mb-1">Away</div>
-                      <div className="text-lg font-semibold">{matchPreview.away.club.name}</div>
-                      <div className="text-sm text-slate-600">League rank: {matchPreview.away.rank || '—'}</div>
-                      <div className="text-sm text-slate-600">XI rating: {matchPreview.away.avgRating}</div>
-                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.away.form)}</div>
-                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.away.club.id === playerClub.id ? mentality : matchPreview.away.mentality}</div>
-                    </div>
+                  </section>
+                ) : null}
+
+                {/* League Table */}
+                <section>
+                  <h2 className="font-semibold mb-2">League Table</h2>
+                  <div className="overflow-auto border rounded">
+                    <table className="w-full text-sm">
+                      <thead className="bg-slate-100">
+                        <tr>
+                          <th className="p-2 text-left">#</th>
+                          <th className="p-2 text-left">Team</th>
+                          <th className="p-2">P</th>
+                          <th className="p-2">W</th>
+                          <th className="p-2">D</th>
+                          <th className="p-2">L</th>
+                          <th className="p-2">GF</th>
+                          <th className="p-2">GA</th>
+                          <th className="p-2">GD</th>
+                          <th className="p-2">Pts</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {leagueTable.map((r,i)=> (
+                          <tr key={r.team} className={`${r.team===playerClub.name? 'bg-amber-50':''}`}>
+                            <td className="p-2">{i+1}</td>
+                            <td className="p-2">{r.team}</td>
+                            <td className="p-2 text-center">{r.P}</td>
+                            <td className="p-2 text-center">{r.W}</td>
+                            <td className="p-2 text-center">{r.D}</td>
+                            <td className="p-2 text-center">{r.L}</td>
+                            <td className="p-2 text-center">{r.GF}</td>
+                            <td className="p-2 text-center">{r.GA}</td>
+                            <td className="p-2 text-center">{r.GD}</td>
+                            <td className="p-2 text-center font-medium">{r.Pts}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-                    <div className="bg-white rounded-lg border p-3">
-                      <div className="text-sm font-semibold mb-2">{matchPreview.home.club.name} XI</div>
-                      <div className="space-y-1 text-xs text-slate-600">
-                        {matchPreview.home.lineup.map(player => (
-                          <div key={player.id} className="flex items-start justify-between gap-2">
-                            <div>
-                              <div>{player.name} ({player.pos})</div>
-                              <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
-                            </div>
-                            <div className="font-medium">{player.rating}</div>
-                          </div>
+                </section>
+              </>
+            ) : (
+              <section className="space-y-4">
+                <div className="border rounded-lg bg-slate-50 p-3">
+                  <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+                    <div className="flex flex-col gap-2">
+                      <label className="text-xs font-semibold text-slate-500" htmlFor="filter-club">Club</label>
+                      <select
+                        id="filter-club"
+                        value={playerStatsFilters.club}
+                        onChange={(e)=> setPlayerStatsFilters((prev)=> ({ ...prev, club: e.target.value }))}
+                        className="px-3 py-2 rounded border bg-white text-sm"
+                      >
+                        {clubFilterOptions.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
                         ))}
-                      </div>
+                      </select>
                     </div>
-                    <div className="bg-white rounded-lg border p-3">
-                      <div className="text-sm font-semibold mb-2">{matchPreview.away.club.name} XI</div>
-                      <div className="space-y-1 text-xs text-slate-600">
-                        {matchPreview.away.lineup.map(player => (
-                          <div key={player.id} className="flex items-start justify-between gap-2">
-                            <div>
-                              <div>{player.name} ({player.pos})</div>
-                              <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
-                            </div>
-                            <div className="font-medium">{player.rating}</div>
-                          </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-xs font-semibold text-slate-500" htmlFor="filter-position">Position</label>
+                      <select
+                        id="filter-position"
+                        value={playerStatsFilters.position}
+                        onChange={(e)=> setPlayerStatsFilters((prev)=> ({ ...prev, position: e.target.value }))}
+                        className="px-3 py-2 rounded border bg-white text-sm"
+                      >
+                        {positionOptions.map((pos) => (
+                          <option key={pos} value={pos}>{pos === 'all' ? 'All positions' : pos}</option>
                         ))}
-                      </div>
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-xs font-semibold text-slate-500" htmlFor="filter-sort">Sort by</label>
+                      <select
+                        id="filter-sort"
+                        value={playerStatsFilters.sort}
+                        onChange={(e)=> setPlayerStatsFilters((prev)=> ({ ...prev, sort: e.target.value }))}
+                        className="px-3 py-2 rounded border bg-white text-sm"
+                      >
+                        <option value="rating">Average rating</option>
+                        <option value="goals">Goals</option>
+                        <option value="assists">Assists</option>
+                        <option value="xg">Expected goals</option>
+                        <option value="minutes">Minutes played</option>
+                      </select>
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-xs font-semibold text-slate-500" htmlFor="filter-search">Search</label>
+                      <input
+                        id="filter-search"
+                        type="text"
+                        value={playerStatsFilters.search}
+                        onChange={(e)=> setPlayerStatsFilters((prev)=> ({ ...prev, search: e.target.value }))}
+                        className="px-3 py-2 rounded border bg-white text-sm"
+                        placeholder="Player name"
+                      />
                     </div>
                   </div>
                 </div>
-              </section>
-            ) : null}
 
-            {/* League Table */}
-            <section>
-              <h2 className="font-semibold mb-2">League Table</h2>
-              <div className="overflow-auto border rounded">
-                <table className="w-full text-sm">
-                  <thead className="bg-slate-100">
-                    <tr>
-                      <th className="p-2 text-left">#</th>
-                      <th className="p-2 text-left">Team</th>
-                      <th className="p-2">P</th>
-                      <th className="p-2">W</th>
-                      <th className="p-2">D</th>
-                      <th className="p-2">L</th>
-                      <th className="p-2">GF</th>
-                      <th className="p-2">GA</th>
-                      <th className="p-2">GD</th>
-                      <th className="p-2">Pts</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {leagueTable.map((r,i)=> (
-                      <tr key={r.team} className={`${r.team===playerClub.name? 'bg-amber-50':''}`}>
-                        <td className="p-2">{i+1}</td>
-                        <td className="p-2">{r.team}</td>
-                        <td className="p-2 text-center">{r.P}</td>
-                        <td className="p-2 text-center">{r.W}</td>
-                        <td className="p-2 text-center">{r.D}</td>
-                        <td className="p-2 text-center">{r.L}</td>
-                        <td className="p-2 text-center">{r.GF}</td>
-                        <td className="p-2 text-center">{r.GA}</td>
-                        <td className="p-2 text-center">{r.GD}</td>
-                        <td className="p-2 text-center font-medium">{r.Pts}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                  {playerStatsList.length === 0 ? (
+                    <div className="text-sm text-slate-500 col-span-full">No player statistics yet. Play matches to populate this view.</div>
+                  ) : playerStatsList.map((player) => (
+                    <div key={player.playerId || player.name} className="border rounded-2xl bg-white p-4 shadow-sm flex flex-col gap-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-lg font-semibold">{player.name}</div>
+                          <div className="text-xs text-slate-500">{player.clubName} • {player.pos}</div>
+                          <div className="text-xs text-slate-400">Appearances: {player.appearances} — Minutes: {player.minutes}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-2xl font-bold text-emerald-600">{player.overall}</div>
+                          <div className="text-xs text-slate-500 uppercase tracking-wide">OVR</div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-sm text-slate-600">
+                        <div className="p-2 rounded-lg bg-slate-50">
+                          <div className="text-xs uppercase text-slate-500">Goals</div>
+                          <div className="text-base font-semibold">{player.goals}</div>
+                          <div className="text-[11px] text-slate-400">{player.goalsPer90.toFixed(2)} per 90</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50">
+                          <div className="text-xs uppercase text-slate-500">Assists</div>
+                          <div className="text-base font-semibold">{player.assists}</div>
+                          <div className="text-[11px] text-slate-400">Avg rating {player.avgMatchRating?.toFixed(2) || '0.00'}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50">
+                          <div className="text-xs uppercase text-slate-500">Shots on target</div>
+                          <div className="text-base font-semibold">{player.shotsOnTarget}</div>
+                          <div className="text-[11px] text-slate-400">Shots/90 {player.shotsPer90.toFixed(2)}</div>
+                        </div>
+                        <div className="p-2 rounded-lg bg-slate-50">
+                          <div className="text-xs uppercase text-slate-500">Expected goals</div>
+                          <div className="text-base font-semibold">{player.xg.toFixed(2)}</div>
+                          <div className="text-[11px] text-slate-400">xG/90 {player.xgPer90.toFixed(2)}</div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs text-slate-500">
+                        <div>Yellow cards: {player.yellowCards}</div>
+                        <div>Last rating: {player.lastMatchRating ? player.lastMatchRating.toFixed(2) : '—'}</div>
+                      </div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {player.clubId === playerClub.id ? (
+                          <>
+                            <button onClick={()=>discussContract(player.playerId)} className="px-3 py-1.5 rounded-full border text-xs">Discuss contract</button>
+                            <button onClick={()=>transferListFromStats(player.playerId)} className="px-3 py-1.5 rounded-full border text-xs text-amber-600">Add to transfer list</button>
+                            <button onClick={()=>praisePlayer(player.playerId)} className="px-3 py-1.5 rounded-full border text-xs text-emerald-600">Praise form</button>
+                          </>
+                        ) : (
+                          <>
+                            <button onClick={()=>enquireTransfer(player.playerId)} className="px-3 py-1.5 rounded-full border text-xs">Enquire</button>
+                            <button onClick={()=>shortlistPlayer(player.playerId)} className="px-3 py-1.5 rounded-full border text-xs text-emerald-600">Shortlist</button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
           </div>
 
@@ -1083,7 +1603,7 @@ function FootballManagerLite() {
         </aside>
       </div>
 
-      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Release version: {APP_VERSION}</footer>
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-xs text-slate-400 uppercase tracking-wide">Release {APP_VERSION}</footer>
 
       {/* Fullscreen Match Overlay (Sofascore-like) */}
       {matchOverlay ? (

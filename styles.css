@@ -64,6 +64,7 @@ button:disabled {
 
 .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
 .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+.py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
 .py-0\.5 { padding-top: 0.125rem; padding-bottom: 0.125rem; }
 
 .mt-1 { margin-top: 0.25rem; }
@@ -80,6 +81,7 @@ button:disabled {
 .space-y-1 > * + * { margin-top: 0.25rem; }
 .space-y-2 > * + * { margin-top: 0.5rem; }
 .space-y-3 > * + * { margin-top: 0.75rem; }
+.space-y-4 > * + * { margin-top: 1rem; }
 
 .gap-1 { gap: 0.25rem; }
 .gap-2 { gap: 0.5rem; }
@@ -89,7 +91,12 @@ button:disabled {
 
 .grid { display: grid; }
 .grid-cols-1 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.col-span-full { grid-column: 1 / -1; }
 .sm\:grid-cols-2 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.md\:grid-cols-2 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.md\:grid-cols-3 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.lg\:grid-cols-4 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
+.xl\:grid-cols-3 { grid-template-columns: repeat(1, minmax(0, 1fr)); }
 
 @media (min-width: 640px) {
   .sm\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -101,21 +108,34 @@ button:disabled {
   .lg\:grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
+@media (min-width: 1280px) {
+  .xl\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 .max-w-7xl { max-width: 80rem; }
 .mx-auto { margin-left: auto; margin-right: auto; }
 
 .flex { display: flex; }
 .flex-1 { flex: 1 1 0%; }
 .flex-col { flex-direction: column; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.justify-between { justify-content: space-between; }
+.justify-center { justify-content: center; }
 .md\:flex-row { flex-direction: column; }
 
 @media (min-width: 768px) {
   .md\:flex-row { flex-direction: row; }
   .md\:w-80 { width: 20rem; }
+  .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .md\:grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .md\:items-start { align-items: flex-start; }
+  .md\:items-end { align-items: flex-end; }
+  .md\:justify-between { justify-content: space-between; }
 }
 
-.items-center { align-items: center; }
-.justify-between { justify-content: space-between; }
 
 .w-full { width: 100%; }
 .h-full { height: 100%; }
@@ -131,9 +151,13 @@ button:disabled {
 .rounded { border-radius: 0.25rem; }
 .rounded-lg { border-radius: 0.5rem; }
 .rounded-2xl { border-radius: 1rem; }
+.rounded-full { border-radius: 9999px; }
 
 .shadow {
   box-shadow: 0 10px 30px -12px rgba(15, 23, 42, 0.25);
+}
+.shadow-sm {
+  box-shadow: 0 12px 30px -16px rgba(15, 23, 42, 0.28);
 }
 
 .bg-white { background-color: #ffffff; }
@@ -153,20 +177,25 @@ button:disabled {
 .text-white\/60 { color: rgba(255, 255, 255, 0.6); }
 .text-white\/50 { color: rgba(255, 255, 255, 0.5); }
 .text-white\/70 { color: rgba(255, 255, 255, 0.7); }
+.text-slate-400 { color: #94a3b8; }
 .text-slate-500 { color: #64748b; }
 .text-slate-600 { color: #475569; }
+.text-emerald-600 { color: #059669; }
 .text-amber-600 { color: #d97706; }
 .text-red-600 { color: #dc2626; }
 .text-center { text-align: center; }
 .text-left { text-align: left; }
 .uppercase { text-transform: uppercase; }
+.tracking-wide { letter-spacing: 0.08em; }
 .text-right { text-align: right; }
 
 .text-xs { font-size: 0.75rem; }
 .text-sm { font-size: 0.875rem; }
+.text-base { font-size: 1rem; }
 .text-lg { font-size: 1.125rem; }
 .text-2xl { font-size: 1.5rem; }
 .text-3xl { font-size: 1.875rem; }
+.text-\[11px\] { font-size: 0.6875rem; }
 
 .font-medium { font-weight: 500; }
 .font-semibold { font-weight: 600; }
@@ -224,7 +253,7 @@ button.bg-white\/5:hover {
   background-color: rgba(255, 255, 255, 0.15);
 }
 
-button.text-amber-600 {
+button.text-amber-600 { 
   color: #d97706;
 }
 
@@ -238,6 +267,14 @@ button.text-red-600 {
 
 button.text-red-600:hover {
   background-color: rgba(248, 113, 113, 0.15);
+}
+
+button.text-emerald-600 {
+  color: #059669;
+}
+
+button.text-emerald-600:hover {
+  background-color: rgba(16, 185, 129, 0.12);
 }
 
 .max-w-7xl > .grid { width: 100%; }
