@@ -9629,7 +9629,7 @@
             "preferredFoot": "Right"
           }
         },
-        {
+dem        {
           "id": "p277484",
           "name": "Marius Courcoul",
           "pos": "CB",
