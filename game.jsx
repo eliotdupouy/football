@@ -1,5 +1,13 @@
 const { useEffect, useMemo, useRef, useState } = React;
 
+const APP_VERSION = 'v1.4.0';
+
+const MENTALITY_PROFILES = {
+  Defensive: { attack: -0.6, defense: 0.9, card: -0.2 },
+  Balanced: { attack: 0, defense: 0, card: 0 },
+  Attacking: { attack: 0.8, defense: -0.5, card: 0.25 },
+};
+
 // Football Manager Lite — Sofascore fullscreen match feed
 // Changes requested by user:
 // - Rename "Jouer la ronde" -> "Play Match"
@@ -30,12 +38,154 @@ function randInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
 
 function computeTeamStrength(players) {
   const weight = { GK: 0.9, CB: 1.0, LB: 0.95, RB: 0.95, CM: 1.05, AM: 1.05, LW: 1.1, RW: 1.1, ST: 1.15 };
   const sum = players.reduce((s, p) => s + p.rating * (weight[p.pos] || 1), 0);
   return sum / players.length;
+}
+
+function selectStartingXI(club) {
+  return clone(club.players)
+    .sort((a, b) => b.rating - a.rating)
+    .slice(0, 11);
+}
+
+function getClubRank(clubName, table) {
+  const index = table.findIndex((row) => row.team === clubName);
+  return index === -1 ? null : index + 1;
+}
+
+function getRecentForm(clubName, fixtures, limit = 5) {
+  const played = fixtures
+    .filter((f) => f.played && (f.home === clubName || f.away === clubName))
+    .sort((a, b) => b.round - a.round || (b.id > a.id ? 1 : -1));
+  return played.slice(0, limit).map((fixture) => {
+    const { homeGoals, awayGoals } = fixture.result;
+    const isHome = fixture.home === clubName;
+    const goalsFor = isHome ? homeGoals : awayGoals;
+    const goalsAgainst = isHome ? awayGoals : homeGoals;
+    if (goalsFor > goalsAgainst) return 'W';
+    if (goalsFor < goalsAgainst) return 'L';
+    return 'D';
+  });
+}
+
+function getFormScore(formArray) {
+  if (!formArray.length) return 0;
+  return formArray.reduce((total, result) => {
+    if (result === 'W') return total + 3;
+    if (result === 'D') return total + 1;
+    return total;
+  }, 0) / formArray.length;
+}
+
+function pickOpponentMentality(club, opponent, leagueTable) {
+  const clubStrength = computeTeamStrength(selectStartingXI(club));
+  const opponentStrength = computeTeamStrength(selectStartingXI(opponent));
+  const clubRank = getClubRank(club.name, leagueTable) || leagueTable.length / 2;
+  const opponentRank = getClubRank(opponent.name, leagueTable) || leagueTable.length / 2;
+
+  if (clubStrength > opponentStrength + 8 && (clubRank || 10) < (opponentRank || 10)) {
+    return 'Attacking';
+  }
+  if (clubStrength + 6 < opponentStrength && (clubRank || 10) > (opponentRank || 10)) {
+    return 'Defensive';
+  }
+  return 'Balanced';
+}
+
+function formatFormString(formArray) {
+  return formArray && formArray.length ? formArray.join(' ') : 'No matches yet';
+}
+
+function deriveOdds(homeClub, awayClub, leagueTable, fixtures) {
+  const homeStrength = computeTeamStrength(selectStartingXI(homeClub));
+  const awayStrength = computeTeamStrength(selectStartingXI(awayClub));
+  const homeRank = getClubRank(homeClub.name, leagueTable) || Math.ceil(leagueTable.length / 2) || 4;
+  const awayRank = getClubRank(awayClub.name, leagueTable) || Math.ceil(leagueTable.length / 2) || 4;
+  const homeForm = getFormScore(getRecentForm(homeClub.name, fixtures));
+  const awayForm = getFormScore(getRecentForm(awayClub.name, fixtures));
+
+  const ratingDiff = clamp((homeStrength - awayStrength) / 10, -2, 2);
+  const rankDiff = clamp((awayRank - homeRank) / 5, -2, 2);
+  const formDiff = clamp((homeForm - awayForm) / 3, -1.5, 1.5);
+
+  let homeProb = 0.38 + ratingDiff * 0.06 - rankDiff * 0.04 + formDiff * 0.03;
+  let awayProb = 0.32 - ratingDiff * 0.06 + rankDiff * 0.04 - formDiff * 0.03;
+  let drawProb = 0.3;
+
+  homeProb = clamp(homeProb, 0.15, 0.7);
+  awayProb = clamp(awayProb, 0.15, 0.7);
+  drawProb = clamp(drawProb + clamp(0.5 - (homeProb + awayProb), -0.1, 0.1), 0.1, 0.4);
+
+  const total = homeProb + awayProb + drawProb;
+  homeProb /= total;
+  awayProb /= total;
+  drawProb /= total;
+
+  const toOdds = (prob) => (prob <= 0 ? '—' : (1 / prob).toFixed(2));
+
+  return {
+    homeProb,
+    awayProb,
+    drawProb,
+    homeOdds: toOdds(homeProb),
+    awayOdds: toOdds(awayProb),
+    drawOdds: toOdds(drawProb),
+  };
+}
+
+function computeMatchStatsForMinute(events, possessionLog, minute, homeName, awayName) {
+  const upto = minute <= 0 ? 0 : minute;
+  const stats = {
+    home: { shots: 0, shotsOnTarget: 0, xg: 0, yellowCards: 0, possession: 0, goals: 0 },
+    away: { shots: 0, shotsOnTarget: 0, xg: 0, yellowCards: 0, possession: 0, goals: 0 },
+  };
+
+  possessionLog
+    .filter((entry) => entry.minute <= upto)
+    .forEach((entry) => {
+      stats[entry.team === homeName ? 'home' : 'away'].possession += entry.share;
+    });
+
+  events
+    .filter((event) => event.minute <= upto)
+    .forEach((event) => {
+      const side = event.team === homeName ? 'home' : 'away';
+      if (event.kind === 'goal' || event.kind === 'shot') {
+        stats[side].shots += 1;
+        if (event.onTarget || event.kind === 'goal') {
+          stats[side].shotsOnTarget += 1;
+        }
+        if (typeof event.xg === 'number') {
+          stats[side].xg += event.xg;
+        }
+        if (event.kind === 'goal') {
+          stats[side].goals += 1;
+        }
+      }
+      if (event.kind === 'yellow-card') {
+        stats[side].yellowCards += 1;
+      }
+    });
+
+  const totalPoss = stats.home.possession + stats.away.possession || 1;
+  stats.home.possession = Math.round((stats.home.possession / totalPoss) * 100);
+  stats.away.possession = Math.round((stats.away.possession / totalPoss) * 100);
+  if (upto === 0) {
+    stats.home.possession = 50;
+    stats.away.possession = 50;
+  }
+  stats.home.xg = Number(stats.home.xg.toFixed(2));
+  stats.away.xg = Number(stats.away.xg.toFixed(2));
+
+  return stats;
 }
 
 function generateSeason(clubs) {
@@ -57,38 +207,132 @@ function generateSeason(clubs) {
   return fixtures;
 }
 
-// Create a full event stream for a match: returns {homeGoals, awayGoals, events}
-function prepareMatchEventStream(home, away, tactics = {}) {
+// Create a full event stream for a match with live stats
+function prepareMatchEventStream(home, away, context = {}) {
   const events = [];
-  const homeStrength = computeTeamStrength(home.players) + (tactics.homeAttack - tactics.awayDefense) * 0.6;
-  const awayStrength = computeTeamStrength(away.players) + (tactics.awayAttack - tactics.homeDefense) * 0.6;
-  const total = Math.max(1, homeStrength + awayStrength);
-  const homeAttackRate = (homeStrength / total) * 12 + Math.random() * 2;
-  const awayAttackRate = (awayStrength / total) * 10 + Math.random() * 2;
-  let homeGoals = 0; let awayGoals = 0;
+  const possessionLog = [];
+  const homeLineup = context.homeLineup || selectStartingXI(home);
+  const awayLineup = context.awayLineup || selectStartingXI(away);
+  const homeMentality = context.homeMentality || 'Balanced';
+  const awayMentality = context.awayMentality || 'Balanced';
+  const homeProfile = MENTALITY_PROFILES[homeMentality] || MENTALITY_PROFILES.Balanced;
+  const awayProfile = MENTALITY_PROFILES[awayMentality] || MENTALITY_PROFILES.Balanced;
+
+  const baseHomeStrength = computeTeamStrength(homeLineup);
+  const baseAwayStrength = computeTeamStrength(awayLineup);
+  const homeStrength = baseHomeStrength + homeProfile.attack * 1.8 - awayProfile.defense * 0.8 + (context.homeFormBoost || 0);
+  const awayStrength = baseAwayStrength + awayProfile.attack * 1.8 - homeProfile.defense * 0.8 + (context.awayFormBoost || 0);
+  const defensiveShieldHome = baseHomeStrength + homeProfile.defense * 1.5;
+  const defensiveShieldAway = baseAwayStrength + awayProfile.defense * 1.5;
+
+  let homeGoals = 0;
+  let awayGoals = 0;
+  let sequenceCounter = 0;
+
+  function registerShot({ minute, isHome, onTargetChance, goalChance }) {
+    const lineup = isHome ? homeLineup : awayLineup;
+    const team = isHome ? home : away;
+    const opponent = isHome ? away : home;
+    const profile = isHome ? homeProfile : awayProfile;
+    const shooter = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+    const onTargetProbability = clamp(onTargetChance + profile.attack * 0.04, 0.18, 0.82);
+    const chanceOnTarget = Math.random() < onTargetProbability;
+    const goalProbability = clamp(goalChance + profile.attack * 0.03 - (isHome ? awayProfile.defense : homeProfile.defense) * 0.025, 0.05, 0.65);
+    const xg = clamp(goalProbability + Math.random() * 0.08, 0.03, 0.85);
+    const isGoal = chanceOnTarget && Math.random() < goalProbability;
+
+    if (isGoal) {
+      if (isHome) homeGoals += 1; else awayGoals += 1;
+    }
+
+    const outcomeText = isGoal
+      ? `${team.name} scores! ${shooter.name} finds the net. (${homeGoals}-${awayGoals})`
+      : chanceOnTarget
+        ? `${shooter.name} forces a save from ${opponent.name}.`
+        : `${shooter.name} drags the attempt wide.`;
+
+    events.push({
+      minute,
+      team: team.name,
+      opponent: opponent.name,
+      kind: isGoal ? 'goal' : 'shot',
+      onTarget: chanceOnTarget || isGoal,
+      xg,
+      player: shooter.name,
+      text: outcomeText,
+      scoreboard: { homeGoals, awayGoals },
+      sequence: sequenceCounter += 1,
+    });
+  }
 
   for (let minute = 1; minute <= 90; minute++) {
-    // give minutes some distribution: early/late -> slightly different rates
-    const timeFactor = 1 + (Math.sin((minute / 90) * Math.PI) * 0.25);
-    if (Math.random() < (homeAttackRate / 90) * timeFactor) {
-      if (Math.random() < 0.22 + (homeStrength - awayStrength) / 400) {
-        homeGoals++; events.push({ minute, type: 'goal', text: `${home.name} scores! (${homeGoals}-${awayGoals})`, team: home.name });
-      } else {
-        events.push({ minute, type: 'chance', text: `${home.name} misses a chance.`, team: home.name });
-      }
+    const tempo = 1 + Math.sin((minute / 90) * Math.PI) * 0.18;
+    const homePossChance = clamp(0.5 + (homeStrength - awayStrength) / 190 + homeProfile.attack * 0.05 - awayProfile.attack * 0.02, 0.34, 0.7);
+    const hasHomeBall = Math.random() < homePossChance;
+    possessionLog.push({ minute, team: hasHomeBall ? home.name : away.name, share: 1 });
+
+    const homeAttackChance = clamp(0.08 + (homeStrength - awayStrength) / 220 + homeProfile.attack * 0.035 - awayProfile.defense * 0.02, 0.04, 0.22);
+    const awayAttackChance = clamp(0.08 + (awayStrength - homeStrength) / 220 + awayProfile.attack * 0.035 - homeProfile.defense * 0.02, 0.04, 0.22);
+
+    if (Math.random() < homeAttackChance * tempo * (hasHomeBall ? 1.1 : 0.9)) {
+      const onTargetChance = 0.35 + (homeStrength - defensiveShieldAway) / 250;
+      const goalChance = 0.18 + (homeStrength - defensiveShieldAway) / 260;
+      registerShot({ minute, isHome: true, onTargetChance, goalChance });
     }
-    if (Math.random() < (awayAttackRate / 90) * timeFactor) {
-      if (Math.random() < 0.2 + (awayStrength - homeStrength) / 400) {
-        awayGoals++; events.push({ minute, type: 'goal', text: `${away.name} scores! (${homeGoals}-${awayGoals})`, team: away.name });
-      } else {
-        events.push({ minute, type: 'chance', text: `${away.name} misses a chance.`, team: away.name });
-      }
+
+    if (Math.random() < awayAttackChance * tempo * (!hasHomeBall ? 1.1 : 0.9)) {
+      const onTargetChance = 0.33 + (awayStrength - defensiveShieldHome) / 250;
+      const goalChance = 0.17 + (awayStrength - defensiveShieldHome) / 260;
+      registerShot({ minute, isHome: false, onTargetChance, goalChance });
     }
-    if (Math.random() < 0.005) events.push({ minute, type: 'card', text: `Yellow card — heavy challenge.`, team: (Math.random()<0.5?home.name:away.name) });
-    if (Math.random() < 0.002) events.push({ minute, type: 'injury', text: `Injury: player substituted.`, team: (Math.random()<0.5?home.name:away.name) });
+
+    const cardBase = 0.012 + Math.abs(homeProfile.card) * 0.004 + Math.abs(awayProfile.card) * 0.004;
+    if (Math.random() < cardBase) {
+      const isHomeCard = Math.random() < clamp(0.5 + homeProfile.card * 0.3 - awayProfile.card * 0.1, 0.25, 0.75);
+      const lineup = isHomeCard ? homeLineup : awayLineup;
+      const team = isHomeCard ? home : away;
+      const player = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+      events.push({
+        minute,
+        team: team.name,
+        kind: 'yellow-card',
+        text: `Yellow card for ${player.name} (${team.name}).`,
+        sequence: sequenceCounter += 1,
+      });
+    }
+
+    if (Math.random() < 0.003) {
+      const isHomeInjury = Math.random() < 0.5;
+      const lineup = isHomeInjury ? homeLineup : awayLineup;
+      const team = isHomeInjury ? home : away;
+      const player = lineup[randInt(0, Math.max(0, lineup.length - 1))];
+      events.push({
+        minute,
+        team: team.name,
+        kind: 'injury',
+        text: `${player.name} picks up a knock and needs treatment.`,
+        sequence: sequenceCounter += 1,
+      });
+    }
   }
-  if (Math.random() < 0.03) { if (Math.random() < 0.5) { homeGoals++; events.push({ minute: 90, type: 'goal', text: `${home.name} scores in stoppage time! (${homeGoals}-${awayGoals})`, team: home.name }); } else { awayGoals++; events.push({ minute: 90, type: 'goal', text: `${away.name} scores in stoppage time! (${homeGoals}-${awayGoals})`, team: away.name }); } }
-  return { homeGoals, awayGoals, events, score: `${homeGoals}-${awayGoals}` };
+
+  if (Math.random() < 0.04) {
+    const isHome = Math.random() < 0.5;
+    const minute = 90;
+    const onTargetChance = isHome ? 0.4 + (homeStrength - defensiveShieldAway) / 250 : 0.38 + (awayStrength - defensiveShieldHome) / 250;
+    const goalChance = isHome ? 0.22 + (homeStrength - defensiveShieldAway) / 250 : 0.21 + (awayStrength - defensiveShieldHome) / 250;
+    registerShot({ minute, isHome, onTargetChance, goalChance });
+  }
+
+  return {
+    homeGoals,
+    awayGoals,
+    events: events.sort((a, b) => (a.minute === b.minute ? a.sequence - b.sequence : a.minute - b.minute)),
+    score: `${homeGoals}-${awayGoals}`,
+    possessionLog,
+    lineups: { home: homeLineup, away: awayLineup },
+    mentalities: { home: homeMentality, away: awayMentality },
+  };
 }
 
 // --------------------------- COMPONENT ---------------------------
@@ -117,13 +361,14 @@ function FootballManagerLite() {
   });
 
   const [log, setLog] = useState(()=>{ const raw = localStorage.getItem('fm_log'); return raw?JSON.parse(raw):[]; });
-  const [tactics, setTactics] = useState({ homeAttack:5, homeDefense:5, awayAttack:5, awayDefense:5 });
+  const [mentality, setMentality] = useState(()=> localStorage.getItem('fm_mentality') || 'Balanced');
   const [currentRound, setCurrentRound] = useState(()=>{ const raw = localStorage.getItem('fm_currentRound'); return raw?Number(raw):1; });
 
   useEffect(()=>{ localStorage.setItem('fm_clubs', JSON.stringify(clubs)); }, [clubs]);
   useEffect(()=>{ localStorage.setItem('fm_fixtures_full', JSON.stringify(fixtures)); }, [fixtures]);
   useEffect(()=>{ localStorage.setItem('fm_market', JSON.stringify(market)); }, [market]);
   useEffect(()=>{ localStorage.setItem('fm_log', JSON.stringify(log)); }, [log]);
+  useEffect(()=>{ localStorage.setItem('fm_mentality', mentality); }, [mentality]);
   useEffect(()=>{ localStorage.setItem('fm_currentRound', String(currentRound)); }, [currentRound]);
 
   // --- Sofascore fullscreen state ---
@@ -156,13 +401,31 @@ function FootballManagerLite() {
     return fixtures.find(f=> f.round===round && !f.played) || null;
   }
 
+  function buildMatchContext(homeClub, awayClub) {
+    const homeLineup = selectStartingXI(homeClub);
+    const awayLineup = selectStartingXI(awayClub);
+    const homeMentality = homeClub.id === playerClub.id ? mentality : pickOpponentMentality(homeClub, awayClub, leagueTable);
+    const awayMentality = awayClub.id === playerClub.id ? mentality : pickOpponentMentality(awayClub, homeClub, leagueTable);
+    const homeForm = getFormScore(getRecentForm(homeClub.name, fixtures));
+    const awayForm = getFormScore(getRecentForm(awayClub.name, fixtures));
+    return {
+      homeLineup,
+      awayLineup,
+      homeMentality,
+      awayMentality,
+      homeFormBoost: (homeForm - 1.5) * 1.2,
+      awayFormBoost: (awayForm - 1.5) * 1.2,
+    };
+  }
+
   // Start a single match in overlay (prepares stream then plays)
   function startMatchOverlay(fx) {
     const homeClub = clubs.find(c=>c.name===fx.home); const awayClub = clubs.find(c=>c.name===fx.away);
     if(!homeClub || !awayClub) { pushLog('Unable to start match: clubs not found.'); return; }
-    const stream = prepareMatchEventStream(homeClub, awayClub, tactics);
+    const context = buildMatchContext(homeClub, awayClub);
+    const stream = prepareMatchEventStream(homeClub, awayClub, context);
     // set overlay state
-    setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [] });
+    setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [], context });
   }
 
   // internal: advance one simulated minute (adds events for that minute to displayedEvents)
@@ -173,12 +436,13 @@ function FootballManagerLite() {
       const eventsThisMinute = mo.stream.events.filter(e=> e.minute === nextMinute);
       const displayed = [...mo.displayedEvents, ...eventsThisMinute.map(e=> ({...e}))];
       // update score from stream by filtering events up to nextMinute
-      const homeGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.home.name && e.minute <= nextMinute).length;
-      const awayGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.away.name && e.minute <= nextMinute).length;
+      const homeGoalsSoFar = mo.stream.events.filter(e=> e.kind==='goal' && e.team === mo.home.name && e.minute <= nextMinute).length;
+      const awayGoalsSoFar = mo.stream.events.filter(e=> e.kind==='goal' && e.team === mo.away.name && e.minute <= nextMinute).length;
       // if match finished (90), mark played and apply econ/results
       if (nextMinute >= 90) {
         // finalize: mark fixture played and update clubs (income & ratings)
-        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events });
+        const stats = computeMatchStatsForMinute(mo.stream.events, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
+        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events, stats });
         return { ...mo, pointerMinute: 90, displayedEvents: displayed, playing: false };
       }
       return { ...mo, pointerMinute: nextMinute, displayedEvents: displayed };
@@ -186,8 +450,9 @@ function FootballManagerLite() {
   }
 
   function finalizeMatch(fixtureId, homeClub, awayClub, result) {
+    const enrichedResult = { ...result, score: `${result.homeGoals}-${result.awayGoals}` };
     // update fixtures
-    setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result } : f));
+    setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result: enrichedResult } : f));
     // apply ticket income to home
     const attendance = Math.max(2000, Math.round(5000 + computeTeamStrength(homeClub.players) * 15 + randInt(-1000,1000)));
     const ticketIncome = Math.round(attendance * Math.max(1, homeClub.ticketsPrice));
@@ -231,7 +496,21 @@ function FootballManagerLite() {
   function setSpeed(s) { setMatchOverlay(mo => mo ? { ...mo, speed: s } : mo); }
   function finishMatchNow() {
     // show all remaining events and finalize
-    setMatchOverlay(mo=>{ if(!mo) return mo; const all = mo.stream.events; const homeGoals = all.filter(e=>e.type==='goal' && e.team===mo.home.name).length; const awayGoals = all.filter(e=>e.type==='goal' && e.team===mo.away.name).length; finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all }); return { ...mo, pointerMinute: 90, displayedEvents: [...mo.displayedEvents, ...all.filter(e=> e.minute > mo.pointerMinute)], playing: false }; });
+    setMatchOverlay(mo=>{
+      if(!mo) return mo;
+      const all = mo.stream.events;
+      const homeGoals = all.filter(e=>e.kind==='goal' && e.team===mo.home.name).length;
+      const awayGoals = all.filter(e=>e.kind==='goal' && e.team===mo.away.name).length;
+      const stats = computeMatchStatsForMinute(all, mo.stream.possessionLog, 90, mo.home.name, mo.away.name);
+      finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all, stats });
+      const merged = new Map();
+      [...mo.displayedEvents, ...all].forEach(ev=>{
+        const key = `${ev.minute}-${ev.sequence || ev.player || ev.text}-${ev.team}`;
+        merged.set(key, { ...ev });
+      });
+      const ordered = Array.from(merged.values()).sort((a,b)=> a.minute === b.minute ? ((a.sequence||0) - (b.sequence||0)) : a.minute - b.minute);
+      return { ...mo, pointerMinute: 90, displayedEvents: ordered, playing: false };
+    });
   }
 
   function closeOverlay() { setMatchOverlay(null); }
@@ -264,6 +543,46 @@ function FootballManagerLite() {
     fixtures.filter(f=> f.played).forEach(f=>{ const home = table[f.home]; const away = table[f.away]; const hg = f.result.homeGoals; const ag = f.result.awayGoals; home.P++; away.P++; home.GF += hg; home.GA += ag; home.GD = home.GF - home.GA; away.GF += ag; away.GA += hg; away.GD = away.GF - away.GA; if(hg>ag){ home.W++; away.L++; home.Pts+=3 } else if(ag>hg){ away.W++; home.L++; away.Pts+=3 } else { home.D++; away.D++; home.Pts+=1; away.Pts+=1 } });
     return Object.values(table).sort((a,b)=> b.Pts - a.Pts || b.GD - a.GD || b.GF - a.GF);
   }, [clubs, fixtures]);
+
+  const nextFixture = useMemo(()=> getNextFixtureForRound(), [fixtures, currentRound]);
+
+  const matchPreview = useMemo(()=>{
+    if(!nextFixture) return null;
+    const homeClub = clubs.find(c=> c.name === nextFixture.home);
+    const awayClub = clubs.find(c=> c.name === nextFixture.away);
+    if(!homeClub || !awayClub) return null;
+    const context = buildMatchContext(homeClub, awayClub);
+    const odds = deriveOdds(homeClub, awayClub, leagueTable, fixtures);
+    return {
+      fixture: nextFixture,
+      home: {
+        club: homeClub,
+        lineup: context.homeLineup,
+        rank: getClubRank(homeClub.name, leagueTable),
+        form: getRecentForm(homeClub.name, fixtures),
+        mentality: context.homeMentality,
+        avgRating: Math.round(computeTeamStrength(context.homeLineup)),
+      },
+      away: {
+        club: awayClub,
+        lineup: context.awayLineup,
+        rank: getClubRank(awayClub.name, leagueTable),
+        form: getRecentForm(awayClub.name, fixtures),
+        mentality: context.awayMentality,
+        avgRating: Math.round(computeTeamStrength(context.awayLineup)),
+      },
+      odds,
+      playerSide: homeClub.id === playerClub.id ? 'home' : awayClub.id === playerClub.id ? 'away' : null,
+    };
+  }, [nextFixture, clubs, leagueTable, fixtures, mentality, playerClub]);
+
+  const liveStats = (matchOverlay && matchOverlay.stream && matchOverlay.stream.possessionLog) ? computeMatchStatsForMinute(
+    matchOverlay.stream.events,
+    matchOverlay.stream.possessionLog,
+    matchOverlay.pointerMinute,
+    matchOverlay.home.name,
+    matchOverlay.away.name,
+  ) : null;
 
   // render
   return (
@@ -344,6 +663,83 @@ function FootballManagerLite() {
               </div>
             </section>
 
+            {matchPreview ? (
+              <section className="mb-4">
+                <h2 className="font-semibold mb-2">Match Preview</h2>
+                <div className="border rounded-lg bg-slate-50 p-3">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm text-slate-500 mb-1">Home</div>
+                      <div className="text-lg font-semibold">{matchPreview.home.club.name}</div>
+                      <div className="text-sm text-slate-600">League rank: {matchPreview.home.rank || '—'}</div>
+                      <div className="text-sm text-slate-600">XI rating: {matchPreview.home.avgRating}</div>
+                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.home.form)}</div>
+                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.home.club.id === playerClub.id ? mentality : matchPreview.home.mentality}</div>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">Odds & Strategy</div>
+                      <div className="space-y-1 text-sm">
+                        <div className="flex justify-between"><span>Home</span><span>{matchPreview.odds.homeOdds}</span></div>
+                        <div className="flex justify-between"><span>Draw</span><span>{matchPreview.odds.drawOdds}</span></div>
+                        <div className="flex justify-between"><span>Away</span><span>{matchPreview.odds.awayOdds}</span></div>
+                      </div>
+                      {matchPreview.playerSide ? (
+                        <div className="mt-3">
+                          <div className="text-xs text-slate-500">Adjust team mentality</div>
+                          <div className="flex gap-2 mt-2">
+                            {['Defensive','Balanced','Attacking'].map(option => (
+                              <button
+                                key={option}
+                                onClick={()=> setMentality(option)}
+                                className={`px-3 py-1 rounded border ${mentality===option ? 'bg-emerald-500 text-white border-transparent' : ''}`}
+                              >
+                                {option}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="text-xs text-slate-500 mt-2">Risk profile shifts chance of scoring or conceding.</div>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-500 mt-3">You are observing this match as a neutral manager.</div>
+                      )}
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm text-slate-500 mb-1">Away</div>
+                      <div className="text-lg font-semibold">{matchPreview.away.club.name}</div>
+                      <div className="text-sm text-slate-600">League rank: {matchPreview.away.rank || '—'}</div>
+                      <div className="text-sm text-slate-600">XI rating: {matchPreview.away.avgRating}</div>
+                      <div className="text-xs text-slate-500 mt-2">Last 5: {formatFormString(matchPreview.away.form)}</div>
+                      <div className="text-xs text-slate-500 mt-1">Mentality: {matchPreview.away.club.id === playerClub.id ? mentality : matchPreview.away.mentality}</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">{matchPreview.home.club.name} XI</div>
+                      <div className="space-y-1 text-xs text-slate-600">
+                        {matchPreview.home.lineup.map(player => (
+                          <div key={player.id} className="flex justify-between">
+                            <span>{player.name} ({player.pos})</span>
+                            <span>{player.rating}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="bg-white rounded-lg border p-3">
+                      <div className="text-sm font-semibold mb-2">{matchPreview.away.club.name} XI</div>
+                      <div className="space-y-1 text-xs text-slate-600">
+                        {matchPreview.away.lineup.map(player => (
+                          <div key={player.id} className="flex justify-between">
+                            <span>{player.name} ({player.pos})</span>
+                            <span>{player.rating}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
             {/* League Table */}
             <section>
               <h2 className="font-semibold mb-2">League Table</h2>
@@ -420,16 +816,29 @@ function FootballManagerLite() {
         </aside>
       </div>
 
-      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Prototype — fullscreen match feed (Sofascore-like). Click "Play Match" to simulate a minute-by-minute match.</footer>
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Release version: {APP_VERSION}</footer>
 
       {/* Fullscreen Match Overlay (Sofascore-like) */}
       {matchOverlay ? (
         <div className="fixed inset-0 z-50 bg-black bg-opacity-80 flex flex-col text-white">
           <div className="p-4 flex items-center justify-between border-b border-white/10">
-            <div className="flex items-center gap-4">
-              <div className="text-lg font-bold">{matchOverlay.home.name}</div>
-              <div className="text-3xl font-extrabold">{matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.home.name && e.minute <= matchOverlay.pointerMinute).length} - {matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.away.name && e.minute <= matchOverlay.pointerMinute).length}</div>
-              <div className="text-lg font-bold">{matchOverlay.away.name}</div>
+            <div>
+              <div className="flex items-center gap-6">
+                <div className="text-left">
+                  <div className="text-xs text-white/50 uppercase">Home</div>
+                  <div className="text-lg font-bold">{matchOverlay.home.name}</div>
+                  <div className="text-xs text-white/60">Mentality: {matchOverlay.stream.mentalities ? matchOverlay.stream.mentalities.home : 'Balanced'}</div>
+                </div>
+                <div className="text-3xl font-extrabold">
+                  {liveStats ? liveStats.home.goals : 0} - {liveStats ? liveStats.away.goals : 0}
+                </div>
+                <div className="text-right">
+                  <div className="text-xs text-white/50 uppercase">Away</div>
+                  <div className="text-lg font-bold">{matchOverlay.away.name}</div>
+                  <div className="text-xs text-white/60">Mentality: {matchOverlay.stream.mentalities ? matchOverlay.stream.mentalities.away : 'Balanced'}</div>
+                </div>
+              </div>
+              <div className="text-xs text-white/60 mt-2">Live xG: {liveStats ? liveStats.home.xg.toFixed(2) : '0.00'} - {liveStats ? liveStats.away.xg.toFixed(2) : '0.00'}</div>
             </div>
             <div className="flex items-center gap-3">
               <div className="text-sm">{matchOverlay.pointerMinute > 0 ? `${matchOverlay.pointerMinute}’` : `0’`}</div>
@@ -449,33 +858,69 @@ function FootballManagerLite() {
           <div className="flex-1 flex flex-col md:flex-row gap-4 p-4">
             <div className="flex-1 overflow-hidden">
               <div ref={feedRef} className="h-full overflow-auto bg-black/30 rounded p-3">
-                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Match is starting…</div> : matchOverlay.displayedEvents.map((e,i)=> (
-                  <div key={i} className="mb-3 p-2 bg-white/5 rounded">
-                    <div className="text-xs text-white/60">{e.minute}’</div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <div className="text-sm font-medium">{e.type==='goal' ? '⚽' : e.type==='card' ? '🟨' : e.type==='injury' ? '🤕' : '•'}</div>
-                      <div className="text-sm">{e.text}</div>
+                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Match is starting…</div> : matchOverlay.displayedEvents.map((e,i)=> {
+                  const icon = e.kind==='goal' ? '⚽' : e.kind==='yellow-card' ? '🟨' : e.kind==='injury' ? '🤕' : e.onTarget ? '🎯' : '•';
+                  return (
+                    <div key={`${e.sequence || i}-${e.minute}-${e.team}`} className="mb-3 p-2 bg-white/5 rounded">
+                      <div className="flex items-center justify-between text-xs text-white/60">
+                        <span>{e.minute}’</span>
+                        <span>{e.team}</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="text-sm font-medium">{icon}</div>
+                        <div className="text-sm">{e.text}</div>
+                      </div>
+                      {typeof e.xg === 'number' && (e.kind==='goal' || e.kind==='shot') ? (
+                        <div className="text-xs text-white/50 mt-1">xG: {e.xg.toFixed(2)}</div>
+                      ) : null}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
-            <div className="w-full md:w-80">
+            <div className="w-full md:w-80 space-y-3">
               <div className="bg-white/5 rounded p-3">
                 <div className="text-sm mb-2">Controls</div>
                 <div className="flex gap-2 mb-3">
-                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶️ Resume'}</button>
+                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶ Resume'}</button>
                   <button onClick={()=>setSpeed(1)} className={`px-3 py-1 rounded border ${matchOverlay.speed===1? 'bg-emerald-500':''}`}>x1</button>
                   <button onClick={()=>setSpeed(2)} className={`px-3 py-1 rounded border ${matchOverlay.speed===2? 'bg-emerald-500':''}`}>x2</button>
                   <button onClick={()=>setSpeed(4)} className={`px-3 py-1 rounded border ${matchOverlay.speed===4? 'bg-emerald-500':''}`}>x4</button>
                 </div>
-                <div className="text-sm mb-2">Summary</div>
-                <div className="text-xs text-white/70">Projected score: {matchOverlay.stream.score}</div>
-                <div className="mt-2 text-xs">Total events: {matchOverlay.stream.events.length}</div>
+                <div className="text-xs text-white/70">Sim speed adjusts how quickly in-game minutes elapse.</div>
                 <div className="mt-3">
                   <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Skip to end</button>
                 </div>
+              </div>
+
+              <div className="bg-white/5 rounded p-3">
+                <div className="text-sm mb-2">Live stats</div>
+                {liveStats ? (
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <div className="flex justify-between text-xs text-white/70">
+                        <span>{matchOverlay.home.name}</span>
+                        <span>{matchOverlay.away.name}</span>
+                      </div>
+                      <div className="h-2 bg-white/10 rounded overflow-hidden mt-1">
+                        <div style={{ width: `${liveStats.home.possession}%` }} className="h-2 bg-emerald-400"></div>
+                      </div>
+                      <div className="flex justify-between text-xs text-white/60 mt-1">
+                        <span>{liveStats.home.possession}%</span>
+                        <span>{liveStats.away.possession}%</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex justify-between"><span>Shots</span><span>{liveStats.home.shots} - {liveStats.away.shots}</span></div>
+                      <div className="flex justify-between"><span>On target</span><span>{liveStats.home.shotsOnTarget} - {liveStats.away.shotsOnTarget}</span></div>
+                      <div className="flex justify-between"><span>Expected goals</span><span>{liveStats.home.xg.toFixed(2)} - {liveStats.away.xg.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span>Yellow cards</span><span>{liveStats.home.yellowCards} - {liveStats.away.yellowCards}</span></div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-white/60">Stats will populate as the match begins.</div>
+                )}
               </div>
             </div>
           </div>
@@ -486,6 +931,9 @@ function FootballManagerLite() {
               <div>
                 <div className="text-lg font-bold">FULL TIME</div>
                 <div className="text-sm">Final score: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
+                {liveStats ? (
+                  <div className="text-xs text-white/60 mt-1">xG {liveStats.home.xg.toFixed(2)} - {liveStats.away.xg.toFixed(2)} • Shots {liveStats.home.shots} - {liveStats.away.shots}</div>
+                ) : null}
               </div>
               <div>
                 <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Back to season</button>
