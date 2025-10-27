@@ -1,0 +1,489 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+// Football Manager Lite — Sofascore fullscreen match feed
+// Changes requested by user:
+// - Rename "Jouer la ronde" -> "Jouer le match"
+// - Remove "Simuler saison complète"
+// - When "Jouer le match" is clicked, open a fullscreen Sofascore-like feed
+//   that simulates the match minute-by-minute over ~5 minutes in realtime.
+// - Support speed controls: x1 (default ~3.333s per match minute), x2, x4
+// - Feed shows events with minute stamps, auto-scroll and animations (CSS),
+//   and a final match summary before returning to the main UI.
+// - All data still localStorage-persisted; no backend.
+
+// --------------------------- DATA & HELPERS ---------------------------
+const defaultPlayers = [
+  { id: 1, name: "A. Goal", pos: "GK", rating: 65, age: 28 },
+  { id: 2, name: "B. Wing", pos: "LB", rating: 60, age: 25 },
+  { id: 3, name: "C. Steel", pos: "CB", rating: 62, age: 27 },
+  { id: 4, name: "D. Wall", pos: "CB", rating: 63, age: 30 },
+  { id: 5, name: "E. Pace", pos: "RB", rating: 61, age: 24 },
+  { id: 6, name: "F. Ace", pos: "CM", rating: 64, age: 26 },
+  { id: 7, name: "G. Link", pos: "CM", rating: 63, age: 29 },
+  { id: 8, name: "H. Spark", pos: "LW", rating: 66, age: 23 },
+  { id: 9, name: "I. Engine", pos: "AM", rating: 65, age: 27 },
+  { id: 10, name: "J. Strike", pos: "RW", rating: 67, age: 29 },
+  { id: 11, name: "K. Fin", pos: "ST", rating: 68, age: 24 },
+];
+
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function clone(x) { return JSON.parse(JSON.stringify(x)); }
+
+function computeTeamStrength(players) {
+  const weight = { GK: 0.9, CB: 1.0, LB: 0.95, RB: 0.95, CM: 1.05, AM: 1.05, LW: 1.1, RW: 1.1, ST: 1.15 };
+  const sum = players.reduce((s, p) => s + p.rating * (weight[p.pos] || 1), 0);
+  return sum / players.length;
+}
+
+function generateSeason(clubs) {
+  const teams = clubs.map((c) => c.name);
+  if (teams.length % 2 === 1) teams.push("BYE");
+  const rounds = teams.length - 1; const half = teams.length / 2; const fixtures = [];
+  const arr = teams.slice();
+  for (let round = 0; round < rounds; round++) {
+    for (let i = 0; i < half; i++) {
+      const home = arr[i]; const away = arr[arr.length - 1 - i];
+      if (home !== "BYE" && away !== "BYE") {
+        fixtures.push({ id: `${round}-${i}`, round: round + 1, home, away, played: false });
+        fixtures.push({ id: `${round}-${i}-r`, round: round + 1 + rounds, home: away, away: home, played: false });
+      }
+    }
+    arr.splice(1, 0, arr.pop());
+  }
+  fixtures.sort((a, b) => a.round - b.round);
+  return fixtures;
+}
+
+// Create a full event stream for a match: returns {homeGoals, awayGoals, events}
+function prepareMatchEventStream(home, away, tactics = {}) {
+  const events = [];
+  const homeStrength = computeTeamStrength(home.players) + (tactics.homeAttack - tactics.awayDefense) * 0.6;
+  const awayStrength = computeTeamStrength(away.players) + (tactics.awayAttack - tactics.homeDefense) * 0.6;
+  const total = Math.max(1, homeStrength + awayStrength);
+  const homeAttackRate = (homeStrength / total) * 12 + Math.random() * 2;
+  const awayAttackRate = (awayStrength / total) * 10 + Math.random() * 2;
+  let homeGoals = 0; let awayGoals = 0;
+
+  for (let minute = 1; minute <= 90; minute++) {
+    // give minutes some distribution: early/late -> slightly different rates
+    const timeFactor = 1 + (Math.sin((minute / 90) * Math.PI) * 0.25);
+    if (Math.random() < (homeAttackRate / 90) * timeFactor) {
+      if (Math.random() < 0.22 + (homeStrength - awayStrength) / 400) {
+        homeGoals++; events.push({ minute, type: 'goal', text: `${home.name} marque! (${homeGoals}-${awayGoals})`, team: home.name });
+      } else {
+        events.push({ minute, type: 'chance', text: `${home.name} manque une occasion.`, team: home.name });
+      }
+    }
+    if (Math.random() < (awayAttackRate / 90) * timeFactor) {
+      if (Math.random() < 0.2 + (awayStrength - homeStrength) / 400) {
+        awayGoals++; events.push({ minute, type: 'goal', text: `${away.name} marque! (${homeGoals}-${awayGoals})`, team: away.name });
+      } else {
+        events.push({ minute, type: 'chance', text: `${away.name} manque une occasion.`, team: away.name });
+      }
+    }
+    if (Math.random() < 0.005) events.push({ minute, type: 'card', text: `Carton jaune — contact dur.`, team: (Math.random()<0.5?home.name:away.name) });
+    if (Math.random() < 0.002) events.push({ minute, type: 'injury', text: `Blessure: joueur remplacé.`, team: (Math.random()<0.5?home.name:away.name) });
+  }
+  if (Math.random() < 0.03) { if (Math.random() < 0.5) { homeGoals++; events.push({ minute: 90, type: 'goal', text: `${home.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: home.name }); } else { awayGoals++; events.push({ minute: 90, type: 'goal', text: `${away.name} marque dans les arrêts de jeu! (${homeGoals}-${awayGoals})`, team: away.name }); } }
+  return { homeGoals, awayGoals, events, score: `${homeGoals}-${awayGoals}` };
+}
+
+// --------------------------- COMPONENT ---------------------------
+export default function FootballManagerLite() {
+  const [clubs, setClubs] = useState(() => {
+    const raw = localStorage.getItem('fm_clubs');
+    if (raw) return JSON.parse(raw);
+    const ai = ['United Reds','City Blues','Town Stars','Valley FC','Metal FC','Riverside','Lakeview'];
+    return [
+      { id: 0, name: 'FC Demo', players: defaultPlayers.map(p=>({...p})), balance: 200000, ticketsPrice: 15, sponsor: { name: 'NoSponsor', monthly: 5000 } },
+      ...ai.map((name,i)=>({ id: i+1, name, players: defaultPlayers.map(p=>({...p, rating: Math.max(45, p.rating + randInt(-8,10))})), balance:100000+randInt(-30000,30000), ticketsPrice:10+randInt(-3,5), sponsor:{name:`Sponsor ${i+1}`, monthly:3000+randInt(-1000,4000)} }))
+    ];
+  });
+
+  const playerClub = useMemo(()=> clubs.find(c=>c.id===0), [clubs]);
+
+  const [fixtures, setFixtures] = useState(()=>{
+    const raw = localStorage.getItem('fm_fixtures_full');
+    if (raw) return JSON.parse(raw);
+    return generateSeason(clubs);
+  });
+
+  const [market, setMarket] = useState(()=>{
+    const raw = localStorage.getItem('fm_market'); if (raw) return JSON.parse(raw);
+    const m = []; clubs.slice(1).forEach(c=>{ const p = c.players[randInt(0,c.players.length-1)]; m.push({ id:`${c.id}-${p.id}`, fromClub: c.name, player:{...p}, price: Math.round(p.rating*1000 + randInt(-5000,5000)) }); }); return m;
+  });
+
+  const [log, setLog] = useState(()=>{ const raw = localStorage.getItem('fm_log'); return raw?JSON.parse(raw):[]; });
+  const [tactics, setTactics] = useState({ homeAttack:5, homeDefense:5, awayAttack:5, awayDefense:5 });
+  const [currentRound, setCurrentRound] = useState(()=>{ const raw = localStorage.getItem('fm_currentRound'); return raw?Number(raw):1; });
+
+  useEffect(()=>{ localStorage.setItem('fm_clubs', JSON.stringify(clubs)); }, [clubs]);
+  useEffect(()=>{ localStorage.setItem('fm_fixtures_full', JSON.stringify(fixtures)); }, [fixtures]);
+  useEffect(()=>{ localStorage.setItem('fm_market', JSON.stringify(market)); }, [market]);
+  useEffect(()=>{ localStorage.setItem('fm_log', JSON.stringify(log)); }, [log]);
+  useEffect(()=>{ localStorage.setItem('fm_currentRound', String(currentRound)); }, [currentRound]);
+
+  // --- Sofascore fullscreen state ---
+  const [matchOverlay, setMatchOverlay] = useState(null);
+  // matchOverlay = { fixtureId, homeClub, awayClub, stream: { events, homeGoals, awayGoals, score }, pointerMinute, playing, speed }
+
+  const feedRef = useRef(null);
+  const timerRef = useRef(null);
+
+  function pushLog(text) { setLog(l=>[`${new Date().toLocaleString()}: ${text}`, ...l].slice(0,200)); }
+
+  function changePlayerLocalRating(playerId, delta) {
+    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.map(p=> p.id===playerId ? {...p, rating: Math.max(30, Math.min(99, p.rating+delta))} : p)} : c));
+  }
+
+  function signPlayerFromMarket(itemId) {
+    const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transaction échouée: fonds insuffisants pour acheter ${item.player.name} (${price}€)`); return; }
+    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players:[...c.players, {...item.player, id: Date.now()}], balance: c.balance - price} : c));
+    setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfert: ${item.player.name} acheté pour ${price}€`);
+  }
+
+  function listPlayerForSale(playerId, price) {
+    const p = playerClub.players.find(pp=>pp.id===playerId); if(!p) return; const id = `${playerClub.name}-${playerId}-${Date.now()}`;
+    setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p}, price }, ...m]);
+    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} mis en vente pour ${price}€`);
+  }
+
+  // find next fixture in current round (first non-played)
+  function getNextFixtureForRound(round = currentRound) {
+    return fixtures.find(f=> f.round===round && !f.played) || null;
+  }
+
+  // Start a single match in overlay (prepares stream then plays)
+  function startMatchOverlay(fx) {
+    const homeClub = clubs.find(c=>c.name===fx.home); const awayClub = clubs.find(c=>c.name===fx.away);
+    if(!homeClub || !awayClub) { pushLog('Impossible de lancer le match: clubs introuvables.'); return; }
+    const stream = prepareMatchEventStream(homeClub, awayClub, tactics);
+    // set overlay state
+    setMatchOverlay({ fixtureId: fx.id, home: homeClub, away: awayClub, stream, pointerMinute: 0, playing: true, speed: 1, displayedEvents: [] });
+  }
+
+  // internal: advance one simulated minute (adds events for that minute to displayedEvents)
+  function advanceMinute() {
+    setMatchOverlay(mo=>{
+      if(!mo) return mo;
+      const nextMinute = mo.pointerMinute + 1;
+      const eventsThisMinute = mo.stream.events.filter(e=> e.minute === nextMinute);
+      const displayed = [...mo.displayedEvents, ...eventsThisMinute.map(e=> ({...e}))];
+      // update score from stream by filtering events up to nextMinute
+      const homeGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.home.name && e.minute <= nextMinute).length;
+      const awayGoalsSoFar = mo.stream.events.filter(e=> e.type==='goal' && e.team === mo.away.name && e.minute <= nextMinute).length;
+      // if match finished (90), mark played and apply econ/results
+      if (nextMinute >= 90) {
+        // finalize: mark fixture played and update clubs (income & ratings)
+        finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals: homeGoalsSoFar, awayGoals: awayGoalsSoFar, events: mo.stream.events });
+        return { ...mo, pointerMinute: 90, displayedEvents: displayed, playing: false };
+      }
+      return { ...mo, pointerMinute: nextMinute, displayedEvents: displayed };
+    });
+  }
+
+  function finalizeMatch(fixtureId, homeClub, awayClub, result) {
+    // update fixtures
+    setFixtures(fs => fs.map(f=> f.id===fixtureId ? { ...f, played: true, result } : f));
+    // apply ticket income to home
+    const attendance = Math.max(2000, Math.round(5000 + computeTeamStrength(homeClub.players) * 15 + randInt(-1000,1000)));
+    const ticketIncome = Math.round(attendance * Math.max(1, homeClub.ticketsPrice));
+    setClubs(cs => cs.map(c=> {
+      if (c.name === homeClub.name) {
+        const copy = {...c}; copy.balance = copy.balance + ticketIncome; // small rating changes
+        if (result.homeGoals > result.awayGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.min(99, p.rating + (Math.random()<0.15?1:0))}));
+        else if (result.awayGoals > result.homeGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.max(30, p.rating - (Math.random()<0.08?1:0))}));
+        return copy;
+      }
+      if (c.name === awayClub.name) {
+        const copy = {...c}; if (result.awayGoals > result.homeGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.min(99, p.rating + (Math.random()<0.15?1:0))})); else if (result.homeGoals > result.awayGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.max(30, p.rating - (Math.random()<0.08?1:0))})); return copy;
+      }
+      return c;
+    }));
+    pushLog(`${homeClub.name} ${result.homeGoals} - ${result.awayGoals} ${awayClub.name} (recettes: ${ticketIncome}€)`);
+  }
+
+  // controls: play/pause, speed change, finish early
+  useEffect(()=>{
+    if(!matchOverlay) { clearInterval(timerRef.current); timerRef.current = null; return; }
+    if(!matchOverlay.playing) { clearInterval(timerRef.current); timerRef.current = null; return; }
+    // base: 90 minutes -> 300 seconds (5 minutes) => 3333 ms per match-minute at x1
+    const baseMs = 3333; // ~3.333 seconds per match minute
+    const intervalMs = Math.max(50, Math.round(baseMs / matchOverlay.speed));
+    clearInterval(timerRef.current);
+    timerRef.current = setInterval(()=>{ advanceMinute(); }, intervalMs);
+    return ()=> clearInterval(timerRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchOverlay && matchOverlay.playing, matchOverlay && matchOverlay.speed]);
+
+  // autoscroll feed when new events appended
+  useEffect(()=>{
+    if(!feedRef.current) return;
+    feedRef.current.scrollTop = feedRef.current.scrollHeight;
+  }, [matchOverlay && matchOverlay.displayedEvents && matchOverlay.displayedEvents.length]);
+
+  function togglePlayPause() {
+    setMatchOverlay(mo => mo ? { ...mo, playing: !mo.playing } : mo);
+  }
+  function setSpeed(s) { setMatchOverlay(mo => mo ? { ...mo, speed: s } : mo); }
+  function finishMatchNow() {
+    // show all remaining events and finalize
+    setMatchOverlay(mo=>{ if(!mo) return mo; const all = mo.stream.events; const homeGoals = all.filter(e=>e.type==='goal' && e.team===mo.home.name).length; const awayGoals = all.filter(e=>e.type==='goal' && e.team===mo.away.name).length; finalizeMatch(mo.fixtureId, mo.home, mo.away, { homeGoals, awayGoals, events: all }); return { ...mo, pointerMinute: 90, displayedEvents: [...mo.displayedEvents, ...all.filter(e=> e.minute > mo.pointerMinute)], playing: false }; });
+  }
+
+  function closeOverlay() { setMatchOverlay(null); }
+
+  // play match button: takes next fixture in round and starts overlay
+  function onPlayMatchButton() {
+    const fx = getNextFixtureForRound(currentRound);
+    if(!fx) { pushLog('Aucun match disponible pour ce tour.'); return; }
+    startMatchOverlay(fx);
+  }
+
+  // UI helpers
+  function addFreeAgent() { setMarket(m=> [{ id:`free-${Date.now()}`, fromClub:'FreeAgent', player:{ id:Date.now(), name:`Free ${randInt(1,999)}`, pos:['ST','CM','CB'][randInt(0,2)], rating: 55+randInt(-5,12), age: 20+randInt(0,10) }, price:20000 }, ...m]); }
+  function quickSponsor() { setClubs(c=> c.map(cl=> cl.id===0 ? {...cl, sponsor:{ name:`Sponsor ${randInt(1,99)}`, monthly:2000+randInt(0,8000) }} : cl)); }
+  function adjustTicketPrice() { setClubs(c=> c.map(cl=> cl.id===0 ? {...cl, ticketsPrice: Math.max(5, cl.ticketsPrice + randInt(-2,2))} : cl)); }
+
+  // derive league table
+  const leagueTable = useMemo(()=>{
+    const table = {}; clubs.forEach(c=> table[c.name] = { team:c.name, P:0,W:0,D:0,L:0,GF:0,GA:0,GD:0,Pts:0 });
+    fixtures.filter(f=> f.played).forEach(f=>{ const home = table[f.home]; const away = table[f.away]; const hg = f.result.homeGoals; const ag = f.result.awayGoals; home.P++; away.P++; home.GF += hg; home.GA += ag; home.GD = home.GF - home.GA; away.GF += ag; away.GA += hg; away.GD = away.GF - away.GA; if(hg>ag){ home.W++; away.L++; home.Pts+=3 } else if(ag>hg){ away.W++; home.L++; away.Pts+=3 } else { home.D++; away.D++; home.Pts+=1; away.Pts+=1 } });
+    return Object.values(table).sort((a,b)=> b.Pts - a.Pts || b.GD - a.GD || b.GF - a.GF);
+  }, [clubs, fixtures]);
+
+  // render
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-white p-6 font-sans">
+      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <main className="lg:col-span-3">
+          <div className="bg-white rounded-2xl shadow p-4">
+            <header className="flex items-center justify-between mb-4">
+              <div>
+                <h1 className="text-2xl font-bold">{playerClub.name} — Football Manager Lite</h1>
+                <div className="text-sm text-slate-600">Balance: {Math.round(playerClub.balance).toLocaleString()}€ — Sponsor: {playerClub.sponsor.name} ({playerClub.sponsor.monthly}€/mois)</div>
+              </div>
+              <div className="space-x-2">
+                <button onClick={()=>{ const idx = randInt(0, playerClub.players.length-1); const pid = playerClub.players[idx].id; changePlayerLocalRating(pid, randInt(1,3)); pushLog(`Entraînement: ${playerClub.players[idx].name} gagne en forme.`); }} className="px-3 py-1 rounded-lg border">Entraînement</button>
+                <button onClick={()=>{ if(confirm('Réinitialiser la saison ?')){ const fresh = generateSeason(clubs); setFixtures(fresh); setCurrentRound(1); setLog([]); pushLog('Saison réinitialisée.'); } }} className="px-3 py-1 rounded-lg border text-red-600">Réinitialiser saison</button>
+              </div>
+            </header>
+
+            {/* Squad + Transfers */}
+            <section className="mb-4">
+              <h2 className="font-semibold mb-2">Effectif</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {playerClub.players.map(p=> (
+                      <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
+                        <div>
+                          <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
+                          <div className="text-sm text-slate-600">Note: {p.rating} — Age: {p.age}</div>
+                        </div>
+                        <div className="flex gap-1">
+                          <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
+                          <button onClick={()=>changePlayerLocalRating(p.id,1)} className="px-2 py-1 rounded border">+</button>
+                          <button onClick={()=>listPlayerForSale(p.id, Math.round(p.rating*900))} className="px-2 py-1 rounded border text-amber-600">Vendre</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className="font-medium">Marché des transferts</h3>
+                  <div className="max-h-64 overflow-auto mt-2 border rounded p-2 bg-slate-50">
+                    {market.length===0 ? <div className="text-sm text-slate-500">Aucun joueur en vente pour l'instant.</div> : market.map(m=> (
+                      <div key={m.id} className="p-2 rounded border bg-white mb-2">
+                        <div className="flex justify-between items-center">
+                          <div>
+                            <div className="font-medium">{m.player.name} — {m.player.pos}</div>
+                            <div className="text-sm text-slate-600">Depuis: {m.fromClub} — Note: {m.player.rating}</div>
+                          </div>
+                          <div className="text-right">
+                            <div className="font-medium">{m.price}€</div>
+                            <button onClick={()=>signPlayerFromMarket(m.id)} className="px-3 py-1 rounded mt-2 border bg-emerald-500 text-white">Acheter</button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* Fixtures & Play Match */}
+            <section className="mb-4">
+              <h2 className="font-semibold mb-2">Calendrier saisonnier</h2>
+              <div className="flex gap-2 items-center mb-3">
+                <div>Ronde actuelle: {currentRound}</div>
+                <button onClick={onPlayMatchButton} className="px-3 py-1 rounded-lg bg-emerald-500 text-white">Jouer le match</button>
+              </div>
+
+              <div className="max-h-48 overflow-auto border rounded p-2 bg-slate-50">
+                {fixtures.filter(f=> f.round>=currentRound && f.round< currentRound+3).map(f=> (
+                  <div key={f.id} className="p-2 rounded border bg-white mb-2">
+                    <div className="text-sm">R{f.round} — {f.home} vs {f.away} {f.played ? ` — ${f.result.score}` : ''}</div>
+                    {f.played ? <div className="text-xs text-slate-600">Match déjà joué</div> : null}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* League table */}
+            <section>
+              <h2 className="font-semibold mb-2">Classement</h2>
+              <div className="overflow-auto border rounded">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-100">
+                    <tr>
+                      <th className="p-2 text-left">#</th>
+                      <th className="p-2 text-left">Équipe</th>
+                      <th className="p-2">P</th>
+                      <th className="p-2">W</th>
+                      <th className="p-2">D</th>
+                      <th className="p-2">L</th>
+                      <th className="p-2">GF</th>
+                      <th className="p-2">GA</th>
+                      <th className="p-2">GD</th>
+                      <th className="p-2">Pts</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leagueTable.map((r,i)=> (
+                      <tr key={r.team} className={`${r.team===playerClub.name? 'bg-amber-50':''}`}>
+                        <td className="p-2">{i+1}</td>
+                        <td className="p-2">{r.team}</td>
+                        <td className="p-2 text-center">{r.P}</td>
+                        <td className="p-2 text-center">{r.W}</td>
+                        <td className="p-2 text-center">{r.D}</td>
+                        <td className="p-2 text-center">{r.L}</td>
+                        <td className="p-2 text-center">{r.GF}</td>
+                        <td className="p-2 text-center">{r.GA}</td>
+                        <td className="p-2 text-center">{r.GD}</td>
+                        <td className="p-2 text-center font-medium">{r.Pts}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+          </div>
+
+          <div className="mt-4 bg-white rounded-2xl shadow p-4">
+            <h3 className="font-semibold mb-2">Journal & Événements</h3>
+            <div className="max-h-80 overflow-auto border rounded p-2 bg-slate-50">
+              {log.length===0 ? <div className="text-sm text-slate-500">Aucun événement pour l'instant.</div> : log.map((l,i)=> <div key={i} className="text-sm py-0.5">{l}</div>)}
+            </div>
+          </div>
+        </main>
+
+        <aside>
+          <div className="bg-white rounded-2xl shadow p-4 sticky top-6 w-full">
+            <h3 className="font-semibold">Club rapide</h3>
+            <div className="mt-3 space-y-2">
+              <div>Force de l'équipe: {Math.round(computeTeamStrength(playerClub.players))}</div>
+              <div>Joueurs: {playerClub.players.length}</div>
+              <div>Prix billet: {playerClub.ticketsPrice}€</div>
+              <div>Sponsor: {playerClub.sponsor.name} — {playerClub.sponsor.monthly}€/mois</div>
+            </div>
+
+            <div className="mt-4">
+              <h4 className="font-medium">Options rapides</h4>
+              <div className="flex flex-col gap-2 mt-2">
+                <button onClick={addFreeAgent} className="px-3 py-2 rounded border">Ajouter agent libre</button>
+                <button onClick={quickSponsor} className="px-3 py-2 rounded border">Négocier Sponsor (rapide)</button>
+                <button onClick={adjustTicketPrice} className="px-3 py-2 rounded border">Ajuster prix billet</button>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <h4 className="font-medium">Multijoueur local / Ligues</h4>
+              <div className="text-sm text-slate-600 mt-2">La ligue est jouée localement. Pour vrai multijoueur il faut un backend (auth + gestion de parties). Ici, chaque club représente un manager (peut être joué manuellement).</div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-sm text-slate-500">Prototype — plein écran match feed (Sofascore-like). Clique "Jouer le match" pour lancer un match minute-by-minute.</footer>
+
+      {/* Fullscreen Match Overlay (Sofascore-like) */}
+      {matchOverlay ? (
+        <div className="fixed inset-0 z-50 bg-black bg-opacity-80 flex flex-col text-white">
+          <div className="p-4 flex items-center justify-between border-b border-white/10">
+            <div className="flex items-center gap-4">
+              <div className="text-lg font-bold">{matchOverlay.home.name}</div>
+              <div className="text-3xl font-extrabold">{matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.home.name && e.minute <= matchOverlay.pointerMinute).length} - {matchOverlay.stream.events.filter(e=> e.type==='goal' && e.team===matchOverlay.away.name && e.minute <= matchOverlay.pointerMinute).length}</div>
+              <div className="text-lg font-bold">{matchOverlay.away.name}</div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="text-sm">{matchOverlay.pointerMinute > 0 ? `${matchOverlay.pointerMinute}’` : `0’`}</div>
+              <button onClick={()=>{ finishMatchNow(); }} className="px-3 py-1 rounded border bg-white/10">Terminer</button>
+              <button onClick={()=>{ closeOverlay(); }} className="px-3 py-1 rounded border bg-white/5">Quitter</button>
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div className="px-4 py-2">
+            <div className="h-2 bg-white/10 rounded overflow-hidden">
+              <div style={{ width: `${Math.min(100, Math.round((matchOverlay.pointerMinute/90)*100))}%` }} className="h-2 bg-emerald-400"></div>
+            </div>
+          </div>
+
+          {/* Feed + controls */}
+          <div className="flex-1 flex flex-col md:flex-row gap-4 p-4">
+            <div className="flex-1 overflow-hidden">
+              <div ref={feedRef} className="h-full overflow-auto bg-black/30 rounded p-3">
+                {matchOverlay.displayedEvents.length===0 ? <div className="text-center text-sm text-white/70 mt-6">Le match commence…</div> : matchOverlay.displayedEvents.map((e,i)=> (
+                  <div key={i} className="mb-3 p-2 bg-white/5 rounded">
+                    <div className="text-xs text-white/60">{e.minute}’</div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <div className="text-sm font-medium">{e.type==='goal' ? '⚽' : e.type==='card' ? '🟨' : e.type==='injury' ? '🤕' : '•'}</div>
+                      <div className="text-sm">{e.text}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="w-full md:w-80">
+              <div className="bg-white/5 rounded p-3">
+                <div className="text-sm mb-2">Contrôles</div>
+                <div className="flex gap-2 mb-3">
+                  <button onClick={togglePlayPause} className="px-3 py-1 rounded border">{matchOverlay.playing ? '⏸ Pause' : '▶️ Reprendre'}</button>
+                  <button onClick={()=>setSpeed(1)} className={`px-3 py-1 rounded border ${matchOverlay.speed===1? 'bg-emerald-500':''}`}>x1</button>
+                  <button onClick={()=>setSpeed(2)} className={`px-3 py-1 rounded border ${matchOverlay.speed===2? 'bg-emerald-500':''}`}>x2</button>
+                  <button onClick={()=>setSpeed(4)} className={`px-3 py-1 rounded border ${matchOverlay.speed===4? 'bg-emerald-500':''}`}>x4</button>
+                </div>
+                <div className="text-sm mb-2">Résumé</div>
+                <div className="text-xs text-white/70">Score prévu: {matchOverlay.stream.score}</div>
+                <div className="mt-2 text-xs">Événements totaux: {matchOverlay.stream.events.length}</div>
+                <div className="mt-3">
+                  <button onClick={finishMatchNow} className="w-full px-3 py-2 rounded bg-emerald-500">Passer à la fin</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer: final summary shown when playing=false and pointerMinute>=90 */}
+          {(!matchOverlay.playing && matchOverlay.pointerMinute>=90) ? (
+            <div className="p-4 border-t border-white/10 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-bold">FIN DU MATCH</div>
+                <div className="text-sm">Score final: {matchOverlay.stream.homeGoals} - {matchOverlay.stream.awayGoals}</div>
+              </div>
+              <div>
+                <button onClick={()=>{ closeOverlay(); setCurrentRound(r=> r+1); }} className="px-4 py-2 rounded bg-emerald-500">Retour à la saison</button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
