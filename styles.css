@@ -159,6 +159,7 @@ button:disabled {
 .text-red-600 { color: #dc2626; }
 .text-center { text-align: center; }
 .text-left { text-align: left; }
+.uppercase { text-transform: uppercase; }
 .text-right { text-align: right; }
 
 .text-xs { font-size: 0.75rem; }

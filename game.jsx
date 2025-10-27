@@ -1,6 +1,7 @@
 const { useEffect, useMemo, useRef, useState } = React;
 
-const APP_VERSION = 'v1.4.0';
+const APP_VERSION = 'v1.5.0';
+const DATA_VERSION = (window.LIGUE1_DATA && window.LIGUE1_DATA.version) || 'legacy';
 
 const MENTALITY_PROFILES = {
   Defensive: { attack: -0.6, defense: 0.9, card: -0.2 },
@@ -20,7 +21,7 @@ const MENTALITY_PROFILES = {
 // - All data still localStorage-persisted; no backend.
 
 // --------------------------- DATA & HELPERS ---------------------------
-const defaultPlayers = [
+const FALLBACK_PLAYERS = [
   { id: 1, name: "A. Goal", pos: "GK", rating: 65, age: 28 },
   { id: 2, name: "B. Wing", pos: "LB", rating: 60, age: 25 },
   { id: 3, name: "C. Steel", pos: "CB", rating: 62, age: 27 },
@@ -43,6 +44,189 @@ function clamp(value, min, max) {
 }
 
 function clone(x) { return JSON.parse(JSON.stringify(x)); }
+
+function normalizePlayerFromDataset(player, clubCode, index) {
+  if (!player || typeof player !== 'object') {
+    const fallback = FALLBACK_PLAYERS[index % FALLBACK_PLAYERS.length];
+    return { ...fallback, id: `${clubCode}-fallback-${index}` };
+  }
+
+  const baseRating = typeof player.rating === 'number'
+    ? player.rating
+    : typeof player.attributes?.overall === 'number'
+      ? player.attributes.overall
+      : 70;
+
+  const rating = clamp(Math.round(baseRating), 45, 95);
+  const attributes = {
+    pace: clamp(Math.round(player.attributes?.pace ?? rating + randInt(-12, 10)), 30, 99),
+    shooting: clamp(Math.round(player.attributes?.shooting ?? rating + randInt(-10, 8)), 30, 95),
+    passing: clamp(Math.round(player.attributes?.passing ?? rating + randInt(-8, 8)), 35, 95),
+    dribbling: clamp(Math.round(player.attributes?.dribbling ?? rating + randInt(-8, 10)), 35, 96),
+    defending: clamp(Math.round(player.attributes?.defending ?? rating + randInt(-12, 6)), 25, 92),
+    physical: clamp(Math.round(player.attributes?.physical ?? rating + randInt(-10, 8)), 30, 95),
+  };
+
+  attributes.overall = clamp(Math.round(player.attributes?.overall ?? rating), 45, 95);
+
+  return {
+    id: player.id ?? `${clubCode}-p${index}`,
+    name: player.name || `Player ${index + 1}`,
+    pos: player.pos || 'CM',
+    age: player.age ?? 24,
+    rating,
+    attributes,
+  };
+}
+
+function deriveClubEconomics(players, team) {
+  const avgRating = players.length
+    ? players.reduce((sum, p) => sum + (p.rating || 0), 0) / players.length
+    : 70;
+  const balance = team.balance ?? Math.round(150000 + avgRating * 4500);
+  const ticketsPrice = team.ticketsPrice ?? Math.max(12, Math.round(14 + (avgRating - 70) * 0.5));
+  const sponsorMonthly = team.sponsor?.monthly ?? Math.round(4500 + avgRating * 120);
+  const sponsorName = team.sponsor?.name || team.sponsorName || `${team.shortName || team.name} Partner`;
+
+  return {
+    balance,
+    ticketsPrice,
+    sponsor: team.sponsor ? { ...team.sponsor } : { name: sponsorName, monthly: sponsorMonthly },
+  };
+}
+
+function buildDatasetClubs() {
+  if (!window.LIGUE1_DATA || !Array.isArray(window.LIGUE1_DATA.teams)) {
+    return [];
+  }
+
+  return window.LIGUE1_DATA.teams.map((team, idx) => {
+    const clubCode = team.code || `club-${idx}`;
+    const players = (team.players || []).map((player, playerIdx) => normalizePlayerFromDataset(player, clubCode, playerIdx));
+    const economics = deriveClubEconomics(players, team);
+
+    return {
+      id: idx,
+      code: clubCode,
+      name: team.name || `Club ${idx + 1}`,
+      shortName: team.shortName || team.name || `Club ${idx + 1}`,
+      players,
+      ...economics,
+    };
+  });
+}
+
+const DATASET_CLUBS = buildDatasetClubs();
+
+function adjustPlayerRating(player, delta) {
+  const rating = clamp((player?.rating ?? 60) + delta, 40, 99);
+  const attributes = player?.attributes
+    ? { ...player.attributes, overall: clamp((player.attributes.overall ?? rating) + delta, 40, 99) }
+    : undefined;
+  return { ...player, rating, attributes };
+}
+
+function formatPlayerAttributes(attributes) {
+  if (!attributes) return '';
+  return `PAC ${attributes.pace} SHO ${attributes.shooting} PAS ${attributes.passing} DRI ${attributes.dribbling} DEF ${attributes.defending} PHY ${attributes.physical}`;
+}
+
+function ensureClubProfile(club, idx) {
+  const id = club.id ?? idx;
+  const code = club.code || `club-${id}`;
+  const name = club.name || `Club ${idx + 1}`;
+  const shortName = club.shortName || name;
+  const players = (club.players || []).map((player, playerIdx) => {
+    const normalized = normalizePlayerFromDataset(player, code, playerIdx);
+    const rating = typeof player?.rating === 'number' ? clamp(Math.round(player.rating), 40, 99) : normalized.rating;
+    const attributes = {
+      pace: clamp(Math.round(player?.attributes?.pace ?? normalized.attributes.pace), 30, 99),
+      shooting: clamp(Math.round(player?.attributes?.shooting ?? normalized.attributes.shooting), 30, 95),
+      passing: clamp(Math.round(player?.attributes?.passing ?? normalized.attributes.passing), 35, 95),
+      dribbling: clamp(Math.round(player?.attributes?.dribbling ?? normalized.attributes.dribbling), 35, 96),
+      defending: clamp(Math.round(player?.attributes?.defending ?? normalized.attributes.defending), 25, 92),
+      physical: clamp(Math.round(player?.attributes?.physical ?? normalized.attributes.physical), 30, 95),
+      overall: clamp(Math.round(player?.attributes?.overall ?? rating), 40, 99),
+    };
+
+    return {
+      ...normalized,
+      ...player,
+      id: player?.id ?? normalized.id,
+      rating,
+      attributes,
+    };
+  });
+
+  const economics = deriveClubEconomics(players, club);
+
+  return {
+    id,
+    code,
+    name,
+    shortName,
+    players,
+    balance: club.balance ?? economics.balance,
+    ticketsPrice: club.ticketsPrice ?? economics.ticketsPrice,
+    sponsor: club.sponsor ? { ...club.sponsor } : economics.sponsor,
+  };
+}
+
+function cloneClubCollection(source) {
+  return source.map((club, idx) => ensureClubProfile(club, idx));
+}
+
+function createFallbackClubs() {
+  const ai = ['Paris FC', 'Marseille B', 'Lille City', 'Nantes Town', 'Nice Rovers', 'Reims Athletic', 'Lyon Union'];
+  return [
+    {
+      id: 0,
+      name: 'FC Demo',
+      shortName: 'FC Demo',
+      balance: 200000,
+      ticketsPrice: 15,
+      sponsor: { name: 'NoSponsor', monthly: 5000 },
+      players: FALLBACK_PLAYERS.map((p) => ({
+        ...p,
+        attributes: { pace: 60, shooting: 60, passing: 60, dribbling: 60, defending: 60, physical: 60, overall: p.rating },
+      })),
+    },
+    ...ai.map((name, i) => ({
+      id: i + 1,
+      name,
+      shortName: name,
+      balance: 120000 + randInt(-25000, 25000),
+      ticketsPrice: 12 + randInt(-2, 4),
+      sponsor: { name: `Sponsor ${i + 1}`, monthly: 4000 + randInt(-1000, 2000) },
+      players: FALLBACK_PLAYERS.map((p, idx) => {
+        const rating = clamp(p.rating + randInt(-8, 10), 45, 82);
+        return {
+          ...p,
+          id: `${i + 1}-${idx}`,
+          rating,
+          attributes: { pace: 60, shooting: 60, passing: 60, dribbling: 60, defending: 60, physical: 60, overall: rating },
+        };
+      }),
+    })),
+  ];
+}
+
+const DEFAULT_CLUBS = cloneClubCollection(DATASET_CLUBS.length ? DATASET_CLUBS : createFallbackClubs());
+
+function createInitialMarket(clubsCollection) {
+  const deals = [];
+  clubsCollection.slice(1).forEach((club) => {
+    if (!club.players || !club.players.length) return;
+    const pick = club.players[randInt(0, club.players.length - 1)];
+    deals.push({
+      id: `${club.id}-${pick.id}`,
+      fromClub: club.name,
+      player: { ...pick, attributes: pick.attributes ? { ...pick.attributes } : undefined },
+      price: Math.round(pick.rating * 1000 + randInt(-5000, 5000)),
+    });
+  });
+  return deals;
+}
 
 function computeTeamStrength(players) {
   const weight = { GK: 0.9, CB: 1.0, LB: 0.95, RB: 0.95, CM: 1.05, AM: 1.05, LW: 1.1, RW: 1.1, ST: 1.15 };
@@ -338,26 +522,58 @@ function prepareMatchEventStream(home, away, context = {}) {
 // --------------------------- COMPONENT ---------------------------
 function FootballManagerLite() {
   const [clubs, setClubs] = useState(() => {
+    const storedVersion = localStorage.getItem('fm_data_version');
     const raw = localStorage.getItem('fm_clubs');
-    if (raw) return JSON.parse(raw);
-    const ai = ['United Reds','City Blues','Town Stars','Valley FC','Metal FC','Riverside','Lakeview'];
-    return [
-      { id: 0, name: 'FC Demo', players: defaultPlayers.map(p=>({...p})), balance: 200000, ticketsPrice: 15, sponsor: { name: 'NoSponsor', monthly: 5000 } },
-      ...ai.map((name,i)=>({ id: i+1, name, players: defaultPlayers.map(p=>({...p, rating: Math.max(45, p.rating + randInt(-8,10))})), balance:100000+randInt(-30000,30000), ticketsPrice:10+randInt(-3,5), sponsor:{name:`Sponsor ${i+1}`, monthly:3000+randInt(-1000,4000)} }))
-    ];
+    if (raw && storedVersion === DATA_VERSION) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length) {
+          return cloneClubCollection(parsed);
+        }
+      } catch (err) {
+        console.warn('Failed to parse stored clubs, regenerating', err);
+      }
+    }
+    return cloneClubCollection(DEFAULT_CLUBS);
   });
 
-  const playerClub = useMemo(()=> clubs.find(c=>c.id===0), [clubs]);
+  const playerClub = useMemo(()=> {
+    if (!clubs.length) {
+      return ensureClubProfile(DEFAULT_CLUBS[0], 0);
+    }
+    return clubs.find(c=>c.id===0) || clubs[0];
+  }, [clubs]);
 
   const [fixtures, setFixtures] = useState(()=>{
+    const storedVersion = localStorage.getItem('fm_data_version');
     const raw = localStorage.getItem('fm_fixtures_full');
-    if (raw) return JSON.parse(raw);
-    return generateSeason(clubs);
+    if (raw && storedVersion === DATA_VERSION) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (err) {
+        console.warn('Failed to parse stored fixtures, regenerating', err);
+      }
+    }
+    return generateSeason(DEFAULT_CLUBS);
   });
 
   const [market, setMarket] = useState(()=>{
-    const raw = localStorage.getItem('fm_market'); if (raw) return JSON.parse(raw);
-    const m = []; clubs.slice(1).forEach(c=>{ const p = c.players[randInt(0,c.players.length-1)]; m.push({ id:`${c.id}-${p.id}`, fromClub: c.name, player:{...p}, price: Math.round(p.rating*1000 + randInt(-5000,5000)) }); }); return m;
+    const storedVersion = localStorage.getItem('fm_data_version');
+    const raw = localStorage.getItem('fm_market');
+    if (raw && storedVersion === DATA_VERSION) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (err) {
+        console.warn('Failed to parse stored market, regenerating', err);
+      }
+    }
+    return createInitialMarket(DEFAULT_CLUBS);
   });
 
   const [log, setLog] = useState(()=>{ const raw = localStorage.getItem('fm_log'); return raw?JSON.parse(raw):[]; });
@@ -365,6 +581,7 @@ function FootballManagerLite() {
   const [currentRound, setCurrentRound] = useState(()=>{ const raw = localStorage.getItem('fm_currentRound'); return raw?Number(raw):1; });
 
   useEffect(()=>{ localStorage.setItem('fm_clubs', JSON.stringify(clubs)); }, [clubs]);
+  useEffect(()=>{ localStorage.setItem('fm_data_version', DATA_VERSION); }, [clubs]);
   useEffect(()=>{ localStorage.setItem('fm_fixtures_full', JSON.stringify(fixtures)); }, [fixtures]);
   useEffect(()=>{ localStorage.setItem('fm_market', JSON.stringify(market)); }, [market]);
   useEffect(()=>{ localStorage.setItem('fm_log', JSON.stringify(log)); }, [log]);
@@ -381,18 +598,25 @@ function FootballManagerLite() {
   function pushLog(text) { setLog(l=>[`${new Date().toLocaleString()}: ${text}`, ...l].slice(0,200)); }
 
   function changePlayerLocalRating(playerId, delta) {
-    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.map(p=> p.id===playerId ? {...p, rating: Math.max(30, Math.min(99, p.rating+delta))} : p)} : c));
+    setClubs(cs=> cs.map(c=> c.id===0 ? {
+      ...c,
+      players: c.players.map(p=> (p.id === playerId ? adjustPlayerRating(p, delta) : p)),
+    } : c));
   }
 
   function signPlayerFromMarket(itemId) {
     const item = market.find(m=>m.id===itemId); if(!item) return; const price = item.price; if(playerClub.balance < price) { pushLog(`Transfer failed: insufficient funds to buy ${item.player.name} (€${price})`); return; }
-    setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players:[...c.players, {...item.player, id: Date.now()}], balance: c.balance - price} : c));
+    setClubs(cs=> cs.map(c=> c.id===0 ? {
+      ...c,
+      players:[...c.players, { ...item.player, id: Date.now(), attributes: item.player.attributes ? { ...item.player.attributes } : undefined }],
+      balance: c.balance - price
+    } : c));
     setMarket(m=> m.filter(x=>x.id!==itemId)); pushLog(`Transfer: ${item.player.name} bought for €${price}`);
   }
 
   function listPlayerForSale(playerId, price) {
     const p = playerClub.players.find(pp=>pp.id===playerId); if(!p) return; const id = `${playerClub.name}-${playerId}-${Date.now()}`;
-    setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p}, price }, ...m]);
+    setMarket(m=> [{ id, fromClub: playerClub.name, player: {...p, attributes: p.attributes ? { ...p.attributes } : undefined}, price }, ...m]);
     setClubs(cs=> cs.map(c=> c.id===0 ? {...c, players: c.players.filter(pp=>pp.id!==playerId)} : c)); pushLog(`${p.name} listed for sale for €${price}`);
   }
 
@@ -459,12 +683,21 @@ function FootballManagerLite() {
     setClubs(cs => cs.map(c=> {
       if (c.name === homeClub.name) {
         const copy = {...c}; copy.balance = copy.balance + ticketIncome; // small rating changes
-        if (result.homeGoals > result.awayGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.min(99, p.rating + (Math.random()<0.15?1:0))}));
-        else if (result.awayGoals > result.homeGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.max(30, p.rating - (Math.random()<0.08?1:0))}));
+        if (result.homeGoals > result.awayGoals) {
+          copy.players = copy.players.map(p=> (Math.random() < 0.15 ? adjustPlayerRating(p, 1) : p));
+        } else if (result.awayGoals > result.homeGoals) {
+          copy.players = copy.players.map(p=> (Math.random() < 0.08 ? adjustPlayerRating(p, -1) : p));
+        }
         return copy;
       }
       if (c.name === awayClub.name) {
-        const copy = {...c}; if (result.awayGoals > result.homeGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.min(99, p.rating + (Math.random()<0.15?1:0))})); else if (result.homeGoals > result.awayGoals) copy.players = copy.players.map(p=> ({...p, rating: Math.max(30, p.rating - (Math.random()<0.08?1:0))})); return copy;
+        const copy = {...c};
+        if (result.awayGoals > result.homeGoals) {
+          copy.players = copy.players.map(p=> (Math.random() < 0.15 ? adjustPlayerRating(p, 1) : p));
+        } else if (result.homeGoals > result.awayGoals) {
+          copy.players = copy.players.map(p=> (Math.random() < 0.08 ? adjustPlayerRating(p, -1) : p));
+        }
+        return copy;
       }
       return c;
     }));
@@ -524,16 +757,42 @@ function FootballManagerLite() {
 
   function resetSeason() {
     if (!confirm('Reset the season?')) return;
-    const freshFixtures = generateSeason(clubs);
+    const refreshedClubs = cloneClubCollection(DEFAULT_CLUBS);
+    setClubs(refreshedClubs);
+    const freshFixtures = generateSeason(refreshedClubs);
     setFixtures(freshFixtures);
+    setMarket(createInitialMarket(refreshedClubs));
     setCurrentRound(1);
     setMatchOverlay(null);
     setLog([]);
-    pushLog('Season reset.');
+    pushLog('Season reset to the official Ligue 1 dataset.');
   }
 
   // UI helpers
-  function addFreeAgent() { setMarket(m=> [{ id:`free-${Date.now()}`, fromClub:'FreeAgent', player:{ id:Date.now(), name:`Free ${randInt(1,999)}`, pos:['ST','CM','CB'][randInt(0,2)], rating: 55+randInt(-5,12), age: 20+randInt(0,10) }, price:20000 }, ...m]); }
+  function addFreeAgent() {
+    setMarket(m=> {
+      const rating = clamp(55 + randInt(-5, 12), 45, 82);
+      const attributes = {
+        pace: clamp(rating + randInt(-10, 8), 40, 88),
+        shooting: clamp(rating + randInt(-8, 8), 38, 86),
+        passing: clamp(rating + randInt(-8, 8), 38, 86),
+        dribbling: clamp(rating + randInt(-8, 8), 38, 88),
+        defending: clamp(rating + randInt(-12, 6), 30, 82),
+        physical: clamp(rating + randInt(-10, 8), 38, 88),
+      };
+      attributes.overall = rating;
+      const pos = ['ST','CM','CB'][randInt(0,2)];
+      const newPlayer = {
+        id: Date.now(),
+        name: `Free ${randInt(1,999)}`,
+        pos,
+        rating,
+        age: 20 + randInt(0,10),
+        attributes,
+      };
+      return [{ id:`free-${Date.now()}`, fromClub:'FreeAgent', player:newPlayer, price:20000 + randInt(-5000, 7000) }, ...m];
+    });
+  }
   function quickSponsor() { setClubs(c=> c.map(cl=> cl.id===0 ? {...cl, sponsor:{ name:`Sponsor ${randInt(1,99)}`, monthly:2000+randInt(0,8000) }} : cl)); }
   function adjustTicketPrice() { setClubs(c=> c.map(cl=> cl.id===0 ? {...cl, ticketsPrice: Math.max(5, cl.ticketsPrice + randInt(-2,2))} : cl)); }
 
@@ -611,7 +870,8 @@ function FootballManagerLite() {
                       <div key={p.id} className="flex items-center justify-between p-2 rounded-lg border">
                         <div>
                           <div className="font-medium">{p.name} <span className="text-sm text-slate-500">({p.pos})</span></div>
-                          <div className="text-sm text-slate-600">Rating: {p.rating} — Age: {p.age}</div>
+                          <div className="text-sm text-slate-600">OVR {p.rating} — Age {p.age}</div>
+                          <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(p.attributes)}</div>
                         </div>
                         <div className="flex gap-1">
                           <button onClick={()=>changePlayerLocalRating(p.id,-1)} className="px-2 py-1 rounded border">-</button>
@@ -631,7 +891,8 @@ function FootballManagerLite() {
                         <div className="flex justify-between items-center">
                           <div>
                             <div className="font-medium">{m.player.name} — {m.player.pos}</div>
-                            <div className="text-sm text-slate-600">From: {m.fromClub} — Rating: {m.player.rating}</div>
+                            <div className="text-sm text-slate-600">From: {m.fromClub} — OVR {m.player.rating}</div>
+                            <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(m.player.attributes)}</div>
                           </div>
                           <div className="text-right">
                             <div className="font-medium">{m.price}€</div>
@@ -717,9 +978,12 @@ function FootballManagerLite() {
                       <div className="text-sm font-semibold mb-2">{matchPreview.home.club.name} XI</div>
                       <div className="space-y-1 text-xs text-slate-600">
                         {matchPreview.home.lineup.map(player => (
-                          <div key={player.id} className="flex justify-between">
-                            <span>{player.name} ({player.pos})</span>
-                            <span>{player.rating}</span>
+                          <div key={player.id} className="flex items-start justify-between gap-2">
+                            <div>
+                              <div>{player.name} ({player.pos})</div>
+                              <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
+                            </div>
+                            <div className="font-medium">{player.rating}</div>
                           </div>
                         ))}
                       </div>
@@ -728,9 +992,12 @@ function FootballManagerLite() {
                       <div className="text-sm font-semibold mb-2">{matchPreview.away.club.name} XI</div>
                       <div className="space-y-1 text-xs text-slate-600">
                         {matchPreview.away.lineup.map(player => (
-                          <div key={player.id} className="flex justify-between">
-                            <span>{player.name} ({player.pos})</span>
-                            <span>{player.rating}</span>
+                          <div key={player.id} className="flex items-start justify-between gap-2">
+                            <div>
+                              <div>{player.name} ({player.pos})</div>
+                              <div className="text-xs text-slate-500 uppercase">{formatPlayerAttributes(player.attributes)}</div>
+                            </div>
+                            <div className="font-medium">{player.rating}</div>
                           </div>
                         ))}
                       </div>
