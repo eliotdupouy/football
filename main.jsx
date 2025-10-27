@@ -1,9 +1,10 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import FootballManagerLite from './game.jsx';
+const { StrictMode } = React;
+const { createRoot } = ReactDOM;
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
+const FootballManagerLite = window.FootballManagerLite;
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
     <FootballManagerLite />
-  </React.StrictMode>
+  </StrictMode>
 );
