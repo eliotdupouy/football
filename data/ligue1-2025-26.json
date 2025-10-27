@@ -1,5 +1,4 @@
-(() => {
-  const data = {
+{
   "version": "ligue1-2025-26-fifacm-r1",
   "season": "2025-26",
   "league": "Ligue 1 McDonald's",
@@ -9629,7 +9628,7 @@
             "preferredFoot": "Right"
           }
         },
-dem        {
+        {
           "id": "p277484",
           "name": "Marius Courcoul",
           "pos": "CB",
@@ -9653,6 +9652,4 @@ dem        {
       ]
     }
   ]
-};
-  window.LIGUE1_DATA = data;
-})();
+}

@@ -1603,7 +1603,7 @@ function FootballManagerLite() {
         </aside>
       </div>
 
-      <footer className="max-w-7xl mx-auto mt-6 text-center text-xs text-slate-400 uppercase tracking-wide">Release {APP_VERSION}</footer>
+      <footer className="max-w-7xl mx-auto mt-6 text-center text-xs text-slate-400 uppercase tracking-wide">Release {APP_VERSION} • Data {DATA_VERSION}</footer>
 
       {/* Fullscreen Match Overlay (Sofascore-like) */}
       {matchOverlay ? (
